@@ -59,7 +59,28 @@ runs:
         CLOUDFLARE_API_TOKEN: ${{ inputs.cloudflare_api_token }}
         CLOUDFLARE_ACCOUNT_ID: ${{ inputs.cloudflare_account_id }}
       run: |
-        TARGET=$(jq -r '.applied_migration_version' "${{ inputs.config_file }}")
+        CONFIG="${{ inputs.config_file }}"
+
+        if [[ ! -f "$CONFIG" ]]; then
+          echo "::warning::$CONFIG not found — skipping migration."
+          echo "needed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        TARGET=$(jq -r '.applied_migration_version // empty' "$CONFIG")
+
+        if [[ -z "$TARGET" ]]; then
+          echo "::warning::$CONFIG is missing 'applied_migration_version' — skipping migration."
+          echo "needed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if ! [[ "$TARGET" =~ ^[0-9]+$ ]]; then
+          echo "::warning::$CONFIG 'applied_migration_version' is not a valid integer (got: $TARGET) — skipping migration."
+          echo "needed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
         ACTUAL=$(npx wrangler d1 execute "${{ inputs.db_name }}" --remote --json \
           --command "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now'))); SELECT COALESCE(MAX(version), 0) AS v FROM schema_migrations;" \
           | jq -r '.[-1].results[0].v // 0')
