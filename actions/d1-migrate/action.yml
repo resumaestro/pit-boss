@@ -71,6 +71,15 @@ runs:
           echo "needed=true" >> "$GITHUB_OUTPUT"
         fi
 
+    - name: Ensure sandbox DB exists
+      shell: bash
+      env:
+        CLOUDFLARE_API_TOKEN: ${{ inputs.cloudflare_api_token }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ inputs.cloudflare_account_id }}
+      run: |
+        npx wrangler d1 info "${{ inputs.sandbox_db_name }}" --remote > /dev/null 2>&1 \
+          || npx wrangler d1 create "${{ inputs.sandbox_db_name }}"
+
     - name: Restore snap cache
       id: snap-cache
       if: steps.versions.outputs.needed == 'true'
