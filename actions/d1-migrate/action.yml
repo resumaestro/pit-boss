@@ -6,8 +6,9 @@ inputs:
     description: Production D1 database name
     required: true
   sandbox_db_name:
-    description: Sandbox D1 database name for dry-run testing
-    required: true
+    description: Sandbox D1 database name for dry-run testing (defaults to <db_name>-sandbox)
+    required: false
+    default: ""
   config_file:
     description: Path to config.json containing applied_migration_version
     required: false
@@ -81,6 +82,12 @@ runs:
           exit 0
         fi
 
+        SANDBOX="${{ inputs.sandbox_db_name }}"
+        if [[ -z "$SANDBOX" ]]; then
+          SANDBOX="${{ inputs.db_name }}-sandbox"
+        fi
+        echo "sandbox_db_name=$SANDBOX" >> "$GITHUB_OUTPUT"
+
         ACTUAL=$(npx wrangler d1 execute "${{ inputs.db_name }}" --remote --json \
           --command "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime('now'))); SELECT COALESCE(MAX(version), 0) AS v FROM schema_migrations;" \
           | jq -r '.[-1].results[0].v // 0')
@@ -93,13 +100,14 @@ runs:
         fi
 
     - name: Ensure sandbox DB exists
+      if: steps.versions.outputs.needed == 'true'
       shell: bash
       env:
         CLOUDFLARE_API_TOKEN: ${{ inputs.cloudflare_api_token }}
         CLOUDFLARE_ACCOUNT_ID: ${{ inputs.cloudflare_account_id }}
       run: |
-        npx wrangler d1 info "${{ inputs.sandbox_db_name }}" --remote > /dev/null 2>&1 \
-          || npx wrangler d1 create "${{ inputs.sandbox_db_name }}"
+        npx wrangler d1 info "${{ steps.versions.outputs.sandbox_db_name }}" --remote > /dev/null 2>&1 \
+          || npx wrangler d1 create "${{ steps.versions.outputs.sandbox_db_name }}"
 
     - name: Restore snap cache
       id: snap-cache
@@ -120,7 +128,7 @@ runs:
         set +e
         bash "${{ github.action_path }}/migrate.sh" \
           --db "${{ inputs.db_name }}" \
-          --sandbox-db "${{ inputs.sandbox_db_name }}" \
+          --sandbox-db "${{ steps.versions.outputs.sandbox_db_name }}" \
           --config "${{ inputs.config_file }}" \
           --migrations "${{ inputs.migrations_dir }}" \
           --snaps "${{ inputs.snaps_dir }}" \

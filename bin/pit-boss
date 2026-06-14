@@ -1,0 +1,34 @@
+#!/bin/sh
+# pit-boss CLI entry point
+
+SCRIPT_DIR=$(cd "$(dirname "$0")/.." && pwd)
+
+COMMAND="$1"
+shift 2>/dev/null || true
+
+case "$COMMAND" in
+  seed)
+    sh "$SCRIPT_DIR/commands/seed.sh" "$@"
+    ;;
+  migration)
+    sh "$SCRIPT_DIR/commands/migration.sh" "$@"
+    ;;
+  pre-commit)
+    sh "$SCRIPT_DIR/pre-commit/resolve-seed-max.sh" "$@"
+    ;;
+  ""|--help|-h)
+    printf 'Usage: pit-boss <command> [options]\n'
+    printf '\n'
+    printf 'Commands:\n'
+    printf '  migration <name>          Scaffold a new migration file pair\n'
+    printf '  seed <file>               Annotate seed with MIN=highest, MAX=open\n'
+    printf '  seed <file> locked        Annotate seed with MIN=MAX=highest\n'
+    printf '  seed <file> --min=N       Annotate seed with MIN=N, NEEDS_VERIFICATION=true\n'
+    printf '  pre-commit                Resolve open MIGRATION_MAX values (run as hook)\n'
+    ;;
+  *)
+    printf 'Unknown command: %s\n' "$COMMAND" >&2
+    printf 'Run pit-boss --help for usage.\n' >&2
+    exit 1
+    ;;
+esac

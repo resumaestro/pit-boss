@@ -2,14 +2,14 @@
 # Reusable D1 migration reconciler.
 #
 # Usage:
-#   ./migrate.sh --db <name> --sandbox-db <name> --config <path> --migrations <path> --snaps <path> [--remote]
+#   ./migrate.sh --db <name> --config <path> --snaps <path> [--sandbox-db <name>] [--migrations <path>] [--remote]
 
 set -euo pipefail
 
 DB_NAME=""
 SANDBOX_DB_NAME=""
 CONFIG_FILE=""
-MIGRATIONS_DIR=""
+MIGRATIONS_DIR="migrations"
 SNAPS_DIR=""
 REMOTE_FLAG=""
 
@@ -25,12 +25,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for var in DB_NAME SANDBOX_DB_NAME CONFIG_FILE MIGRATIONS_DIR SNAPS_DIR; do
+for var in DB_NAME CONFIG_FILE SNAPS_DIR; do
   if [[ -z "${!var}" ]]; then
     echo "ERROR: --$(echo "$var" | tr '[:upper:]' '[:lower:]' | tr '_' '-') is required"
     exit 1
   fi
 done
+
+if [[ -z "$SANDBOX_DB_NAME" ]]; then
+  SANDBOX_DB_NAME="${DB_NAME}-sandbox"
+  echo "No --sandbox-db specified; defaulting to '$SANDBOX_DB_NAME'"
+fi
 
 mkdir -p "$SNAPS_DIR"
 
@@ -122,6 +127,7 @@ apply_down() {
 
 TARGET=$(jq -r '.applied_migration_version' "$CONFIG_FILE")
 ensure_migrations_table "$DB_NAME"
+ensure_migrations_table "$SANDBOX_DB_NAME"
 ACTUAL=$(get_applied_version "$DB_NAME")
 
 echo "actual=$ACTUAL target=$TARGET"
@@ -131,7 +137,10 @@ if [[ "$TARGET" -eq "$ACTUAL" ]]; then
   exit 0
 fi
 
-ensure_migrations_table "$SANDBOX_DB_NAME"
+if [[ ! -d "$MIGRATIONS_DIR" ]] || [[ -z "$(ls "$MIGRATIONS_DIR"/*.sql 2>/dev/null)" ]]; then
+  echo "WARNING: migrations dir '$MIGRATIONS_DIR' is missing or empty — skipping migration."
+  exit 0
+fi
 
 ACTUAL_SNAP=$(snap_file "$ACTUAL")
 if [[ ! -f "$ACTUAL_SNAP" ]]; then
