@@ -44,7 +44,7 @@ case "$COMMAND" in
     printf '  apply <name>              Scaffold a new apply JSON file\n'
     printf '  apply run [options]       Apply a versioned config through Oboist\n'
     printf '  pre-commit                Resolve open MIGRATION_MAX values (run as hook)\n'
-    printf '  secrets, s [options]      Push secrets from tokens.yml to Cloudflare\n'
+    printf '  secrets, s [options]      Push secrets from .env to Cloudflare via oboist\n'
     printf '  vars, variables, v [opt]  Append variables to wrangler.toml and deploy\n'
     printf '    -c/--config <path>        wrangler config (sibling tokens.yml auto-found)\n'
     printf '    -t/--tokens <path>        tokens.yml (sibling wrangler config auto-found)\n'

@@ -1,0 +1,33 @@
+name: Push Secrets
+description: Fetch each named secret from Oboist and push to the Cloudflare Worker.
+
+inputs:
+  secrets:
+    description: JSON array of secret names to fetch and push
+    required: true
+  config:
+    description: Path to wrangler.toml
+    required: true
+  proxy_url:
+    description: Oboist base URL
+    required: true
+  proxy_token:
+    description: Oboist bearer token
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch and push secrets
+      shell: bash
+      env:
+        PROXY_URL: ${{ inputs.proxy_url }}
+        PROXY_TOKEN: ${{ inputs.proxy_token }}
+      run: |
+        printf '%s' '${{ inputs.secrets }}' | jq -r '.[]' | while IFS= read -r name; do
+          value=$(curl --silent --show-error --fail-with-body \
+            "${PROXY_URL%/}/pit-boss/token?kind=secret&name=${name}" \
+            --header "Authorization: Bearer ${PROXY_TOKEN}" \
+            | jq -er '.value')
+          printf '%s' "$value" | npx wrangler secret put "$name" --config "${{ inputs.config }}"
+        done

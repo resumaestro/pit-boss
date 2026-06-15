@@ -1,14 +1,14 @@
 name: Provision
-description: Apply migrations and seeds to production in the correct interleaved order.
+description: Apply migrations and seeds to a single target in the correct interleaved order.
 
 inputs:
-  production_target:
-    description: Production database name
+  target:
+    description: Database target name
     required: true
-  staging_target:
-    description: Staging database name to update after successful production apply; omit to skip
+  is_production:
+    description: Set to 'true' when targeting production; fails fast rather than continuing on error
     required: false
-    default: ""
+    default: "false"
   provision_dir:
     description: Directory containing provision files (migrations, seeds)
     required: false
@@ -37,8 +37,8 @@ runs:
       run: |
         set +e
         bash "${{ github.action_path }}/provision.sh" \
-          --production-target "${{ inputs.production_target }}" \
-          --staging-target "${{ inputs.staging_target }}" \
+          --target "${{ inputs.target }}" \
+          --is-production "${{ inputs.is_production }}" \
           --provision-dir "${{ inputs.provision_dir }}"
         EXIT=$?
         if [[ $EXIT -eq 0 ]]; then

@@ -1,0 +1,53 @@
+name: Deploy Vars
+description: Fetch each named variable from Oboist, append to wrangler.toml, and deploy.
+
+inputs:
+  variables:
+    description: JSON array of variable names to fetch and deploy
+    required: true
+  config:
+    description: Path to wrangler.toml
+    required: true
+  proxy_url:
+    description: Oboist base URL
+    required: true
+  proxy_token:
+    description: Oboist bearer token
+    required: true
+
+outputs:
+  deployed:
+    description: Whether the deployment succeeded
+    value: ${{ steps.deploy.outputs.deployed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch vars and deploy
+      id: deploy
+      shell: bash
+      env:
+        PROXY_URL: ${{ inputs.proxy_url }}
+        PROXY_TOKEN: ${{ inputs.proxy_token }}
+      run: |
+        set +e
+        ARGS=()
+        while IFS= read -r name; do
+          value=$(curl --silent --show-error --fail-with-body \
+            "${PROXY_URL%/}/pit-boss/token?kind=variable&name=${name}" \
+            --header "Authorization: Bearer ${PROXY_TOKEN}" \
+            | jq -er '.value')
+          ARGS+=(--value "${name}:${value}")
+        done < <(printf '%s' '${{ inputs.variables }}' | jq -r '.[]')
+
+        sh "${{ github.action_path }}/../../bin/pit-boss" vars \
+          --config "${{ inputs.config }}" \
+          "${ARGS[@]}"
+        EXIT=$?
+
+        if [[ $EXIT -eq 0 ]]; then
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "deployed=false" >> "$GITHUB_OUTPUT"
+        fi
+        exit $EXIT

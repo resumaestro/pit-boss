@@ -1,0 +1,28 @@
+name: Read Tokens
+description: Parse tokens.yml and output cloudflare secret and variable name lists as JSON arrays.
+
+inputs:
+  tokens:
+    description: Path to tokens.yml
+    required: false
+    default: tokens.yml
+
+outputs:
+  secrets:
+    description: JSON array of cloudflare secret names
+    value: ${{ steps.parse.outputs.secrets }}
+  variables:
+    description: JSON array of cloudflare variable names
+    value: ${{ steps.parse.outputs.variables }}
+
+runs:
+  using: composite
+  steps:
+    - name: Parse tokens.yml
+      id: parse
+      shell: bash
+      run: |
+        secrets=$(yq -o=json '.cloudflare.secret // []' "${{ inputs.tokens }}")
+        variables=$(yq -o=json '.cloudflare.variable // []' "${{ inputs.tokens }}")
+        echo "secrets=$secrets" >> "$GITHUB_OUTPUT"
+        echo "variables=$variables" >> "$GITHUB_OUTPUT"

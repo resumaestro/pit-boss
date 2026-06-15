@@ -67,6 +67,7 @@ execute_database_file() {
       rm -f "$stmt_file"
       return 1
     fi
+
   done < <(python3 - "$sql_file" <<'PYEOF'
 import sys, re
 sql = open(sys.argv[1]).read()

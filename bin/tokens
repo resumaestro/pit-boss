@@ -6,7 +6,7 @@ shift 2>/dev/null || true
 
 CONFIG=""
 TOKENS=""
-ENV_DIR=""
+ENV_FILE=""
 INLINE_VALUES=""
 FORCE=0
 
@@ -21,7 +21,7 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
     --env|-e)
-      ENV_DIR="$2"
+      ENV_FILE="$2"
       shift 2
       ;;
     --value|-v)
@@ -123,23 +123,35 @@ fi
 
 # Build the ordered list of env files to search per-key:
 #   0. --value inline (checked first, before any file)
-#   1. sibling of tokens.yml
-#   2. sibling of config
-#   3. current directory
-#   4. pit-boss root
+#   1. --env file (explicit path)
+#   2. sibling of tokens.yml
+#   3. sibling of config
+#   4. current directory
+#   5. pit-boss root
 _tokens_dir="$(dirname "$TOKENS_FILE")"
 _config_dir=""
 [ -n "$CONFIG" ] && _config_dir="$(dirname "$CONFIG")"
 
 ENV_FILES=""
-for _dir in ${ENV_DIR:+"$ENV_DIR"} "$_tokens_dir" ${_config_dir:+"$_config_dir"} "." "$PIT_BOSS_ROOT"; do
+_add_env_file() {
+  _f="$1"
+  case "$ENV_FILES" in
+    *"$_f"*) ;;
+    *) [ -f "$_f" ] && ENV_FILES="${ENV_FILES} $_f" ;;
+  esac
+}
+
+if [ -n "$ENV_FILE" ]; then
+  if [ ! -f "$ENV_FILE" ]; then
+    printf 'Error: env file not found: %s\n' "$ENV_FILE" >&2
+    exit 1
+  fi
+  _add_env_file "$ENV_FILE"
+fi
+
+for _dir in "$_tokens_dir" ${_config_dir:+"$_config_dir"} "." "$PIT_BOSS_ROOT"; do
   for _name in ".env" ".variables"; do
-    _candidate="$_dir/$_name"
-    # Avoid duplicates
-    case "$ENV_FILES" in
-      *"$_candidate"*) ;;
-      *) [ -f "$_candidate" ] && ENV_FILES="${ENV_FILES} $_candidate" ;;
-    esac
+    _add_env_file "$_dir/$_name"
   done
 done
 
@@ -199,37 +211,76 @@ config_args() {
 
 case "$SUBCOMMAND" in
   secrets|s)
-    if ! has_cloudflare; then
-      printf 'No cloudflare section in tokens.yml, nothing to do.\n'
-      exit 0
+    OBOIST_URL="$(lookup_value "OBOIST_URL")"
+    OBOIST_SECRET="$(lookup_value "OBOIST_SECRET")"
+
+    if [ -z "$OBOIST_URL" ]; then
+      printf 'Error: OBOIST_URL is not set in any env file.\n' >&2
+      exit 1
+    fi
+    if [ -z "$OBOIST_SECRET" ]; then
+      printf 'Error: OBOIST_SECRET is not set in any env file.\n' >&2
+      exit 1
     fi
 
-    SECRETS=$(parse_yaml_list "$TOKENS_FILE" "cloudflare" "secret")
-
-    if [ -z "$SECRETS" ]; then
-      printf 'No secrets defined in cloudflare.secret.\n'
-      exit 0
-    fi
-
-    FAILED=0
-    printf '%s\n' "$SECRETS" | while IFS= read -r SECRET_KEY; do
-      [ -z "$SECRET_KEY" ] && continue
-
-      SECRET_VALUE="$(lookup_value "$SECRET_KEY")"
-
-      if [ -z "$SECRET_VALUE" ]; then
-        if [ "$FORCE" = "1" ]; then
-          printf 'Warning: %s is not set, skipping.\n' "$SECRET_KEY" >&2
-          continue
+    # Collect all KEY=VALUE pairs from env files (skip OBOIST_* and blank/comment lines)
+    SECRETS_JSON=''
+    for _file in $ENV_FILES; do
+      while IFS= read -r _line || [ -n "$_line" ]; do
+        # Skip blank lines and comments
+        case "$_line" in
+          ''|'#'*) continue ;;
+        esac
+        _key="${_line%%=*}"
+        _val="${_line#*=}"
+        # Strip surrounding quotes from value
+        _val="$(printf '%s' "$_val" | sed 's/^"//;s/"$//')"
+        # Skip OBOIST_* keys (they're auth, not secrets to push)
+        case "$_key" in
+          OBOIST_*) continue ;;
+        esac
+        [ -z "$_key" ] || [ -z "$_val" ] && continue
+        # Escape value for JSON (backslash, double-quote, newline, tab)
+        _val_escaped="$(printf '%s' "$_val" | sed 's/\\/\\\\/g;s/"/\\"/g;s/	/\\t/g')"
+        if [ -n "$SECRETS_JSON" ]; then
+          SECRETS_JSON="${SECRETS_JSON},\"${_key}\":\"${_val_escaped}\""
         else
-          printf 'Error: %s is not set. Use --force to skip missing secrets.\n' "$SECRET_KEY" >&2
-          exit 1
+          SECRETS_JSON="\"${_key}\":\"${_val_escaped}\""
         fi
-      fi
-
-      printf 'Putting secret: %s\n' "$SECRET_KEY"
-      printf '%s' "$SECRET_VALUE" | npx wrangler secret put "$SECRET_KEY"$(config_args)
+      done < "$_file"
     done
+
+    if [ -z "$SECRETS_JSON" ]; then
+      printf 'No secrets found in env files.\n'
+      exit 0
+    fi
+
+    BODY="{\"secrets\":{${SECRETS_JSON}}}"
+    ENDPOINT="${OBOIST_URL%/}/pit-boss/secrets"
+
+    printf 'Posting secrets to %s\n' "$ENDPOINT"
+    RESPONSE="$(curl -s -w '\n%{http_code}' \
+      -X POST "$ENDPOINT" \
+      -H "Authorization: Bearer ${OBOIST_SECRET}" \
+      -H "Content-Type: application/json" \
+      -d "$BODY")"
+
+    HTTP_BODY="$(printf '%s' "$RESPONSE" | head -n -1)"
+    HTTP_STATUS="$(printf '%s' "$RESPONSE" | tail -n 1)"
+
+    printf '%s\n' "$HTTP_BODY"
+
+    case "$HTTP_STATUS" in
+      200) exit 0 ;;
+      207)
+        printf 'Warning: some secrets failed to push (HTTP 207).\n' >&2
+        exit 1
+        ;;
+      *)
+        printf 'Error: oboist returned HTTP %s.\n' "$HTTP_STATUS" >&2
+        exit 1
+        ;;
+    esac
     ;;
 
   vars|variables|v)
@@ -304,7 +355,7 @@ case "$SUBCOMMAND" in
     printf 'Options:\n'
     printf '  --config, -c <path>     Path to wrangler.toml/wrangler.jsonc\n'
     printf '  --tokens, -t <path>     Path to tokens.yml\n'
-    printf '  --env,    -e <dir>      Directory containing .env and .variables\n'
+    printf '  --env,    -e <file>     Path to a .env file (secrets: overrides default discovery)\n'
     printf '  --value,  -v <pairs>    Inline KEY:value pairs (comma-separated); overrides sourced files\n'
     printf '                          e.g. -v KEY:val  or  -v "KEY1:val, KEY2:val"\n'
     printf '  --force,  -f            Skip missing secrets/variables instead of erroring\n'
