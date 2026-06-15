@@ -1,0 +1,311 @@
+#!/bin/sh
+# pit-boss tokens subcommands: secrets and vars/variables
+
+SUBCOMMAND="$1"
+shift 2>/dev/null || true
+
+CONFIG=""
+TOKENS=""
+ENV_DIR=""
+INLINE_VALUES=""
+FORCE=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --config|-c)
+      CONFIG="$2"
+      shift 2
+      ;;
+    --tokens|-t)
+      TOKENS="$2"
+      shift 2
+      ;;
+    --env|-e)
+      ENV_DIR="$2"
+      shift 2
+      ;;
+    --value|-v)
+      # Accumulate; may be passed multiple times
+      if [ -n "$INLINE_VALUES" ]; then
+        INLINE_VALUES="${INLINE_VALUES},${2}"
+      else
+        INLINE_VALUES="$2"
+      fi
+      shift 2
+      ;;
+    --force|-f)
+      FORCE=1
+      shift
+      ;;
+    *)
+      printf 'Unknown option: %s\n' "$1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Resolve TOKENS_FILE with priority: --tokens > sibling of --config > current dir
+resolve_tokens_file() {
+  if [ -n "$TOKENS" ]; then
+    printf '%s' "$TOKENS"
+    return
+  fi
+  if [ -n "$CONFIG" ]; then
+    _sibling="$(dirname "$CONFIG")/tokens.yml"
+    if [ -f "$_sibling" ]; then
+      printf '%s' "$_sibling"
+      return
+    fi
+  fi
+  printf '%s' "tokens.yml"
+}
+
+# Resolve CONFIG with priority: --config > sibling of --tokens > current dir (vars only)
+resolve_config_file() {
+  if [ -n "$CONFIG" ]; then
+    printf '%s' "$CONFIG"
+    return
+  fi
+  if [ -n "$TOKENS" ]; then
+    _dir="$(dirname "$TOKENS")"
+    if [ -f "$_dir/wrangler.toml" ]; then
+      printf '%s' "$_dir/wrangler.toml"
+      return
+    fi
+    if [ -f "$_dir/wrangler.jsonc" ]; then
+      printf '%s' "$_dir/wrangler.jsonc"
+      return
+    fi
+  fi
+  if [ -f "wrangler.toml" ]; then
+    printf '%s' "wrangler.toml"
+    return
+  fi
+  if [ -f "wrangler.jsonc" ]; then
+    printf '%s' "wrangler.jsonc"
+    return
+  fi
+  printf ''
+}
+
+PIT_BOSS_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+TOKENS_FILE="$(resolve_tokens_file)"
+if [ ! -f "$TOKENS_FILE" ]; then
+  printf 'Error: tokens.yml not found (looked at: %s)\n' "$TOKENS_FILE" >&2
+  exit 1
+fi
+
+
+# Parse --value/-v inline pairs into a portable lookup string
+# Format stored: \nKEY\nVALUE\nKEY\nVALUE...
+INLINE_KV=""
+if [ -n "$INLINE_VALUES" ]; then
+  _pairs="$(printf '%s' "$INLINE_VALUES" | sed 's/ *, */,/g')"
+  _IFS_SAVE="$IFS"
+  IFS=','
+  for _pair in $_pairs; do
+    IFS="$_IFS_SAVE"
+    _pair="$(printf '%s' "$_pair" | sed 's/^ *//;s/ *$//')"
+    [ -z "$_pair" ] && continue
+    _key="${_pair%%:*}"
+    _val="${_pair#*:}"
+    if [ -z "$_key" ] || [ "$_key" = "$_pair" ]; then
+      printf 'Error: invalid --value format "%s" (expected KEY:value)\n' "$_pair" >&2
+      exit 1
+    fi
+    INLINE_KV="${INLINE_KV}
+${_key}
+${_val}"
+  done
+  IFS="$_IFS_SAVE"
+fi
+
+# Build the ordered list of env files to search per-key:
+#   0. --value inline (checked first, before any file)
+#   1. sibling of tokens.yml
+#   2. sibling of config
+#   3. current directory
+#   4. pit-boss root
+_tokens_dir="$(dirname "$TOKENS_FILE")"
+_config_dir=""
+[ -n "$CONFIG" ] && _config_dir="$(dirname "$CONFIG")"
+
+ENV_FILES=""
+for _dir in ${ENV_DIR:+"$ENV_DIR"} "$_tokens_dir" ${_config_dir:+"$_config_dir"} "." "$PIT_BOSS_ROOT"; do
+  for _name in ".env" ".variables"; do
+    _candidate="$_dir/$_name"
+    # Avoid duplicates
+    case "$ENV_FILES" in
+      *"$_candidate"*) ;;
+      *) [ -f "$_candidate" ] && ENV_FILES="${ENV_FILES} $_candidate" ;;
+    esac
+  done
+done
+
+# Look up a key with per-key priority:
+#   0. --value/-v inline pairs
+#   1-4. each env file in priority order
+lookup_value() {
+  _lkey="$1"
+
+  # Check inline KV pairs first
+  if [ -n "$INLINE_KV" ]; then
+    _iv="$(printf '%s\n' "$INLINE_KV" | awk -v k="$_lkey" 'found{print;exit} $0==k{found=1}')"
+    if [ -n "$_iv" ]; then
+      printf '%s' "$_iv"
+      return
+    fi
+  fi
+
+  # Walk env files in priority order, stop at first file containing the key
+  for _file in $ENV_FILES; do
+    _v="$(grep -m1 "^${_lkey}=" "$_file" 2>/dev/null | cut -d= -f2- | sed 's/^"//;s/"$//')"
+    if [ -n "$_v" ]; then
+      printf '%s' "$_v"
+      return
+    fi
+  done
+}
+
+# Parse a YAML list under a dotted path like "cloudflare.secret" or "cloudflare.variable"
+# Outputs one item per line
+parse_yaml_list() {
+  _file="$1"
+  _section="$2"   # e.g. "cloudflare"
+  _key="$3"       # e.g. "secret" or "variable"
+
+  awk -v section="$_section:" -v key="$_key:" '
+    /^[^ ]/ { in_section = ($0 == section) }
+    in_section && /^  [^ ]/ { in_key = ($0 ~ "^  " key) }
+    in_section && in_key && /^    - / {
+      sub(/^    - /, ""); print
+    }
+    in_section && in_key && /^  [^ ]/ && !/^  '"$_key"':/ { in_key = 0 }
+  ' "$_file"
+}
+
+# Check if cloudflare section exists
+has_cloudflare() {
+  grep -q '^cloudflare:' "$TOKENS_FILE"
+}
+
+# Build wrangler config args
+config_args() {
+  if [ -n "$CONFIG" ]; then
+    printf ' --config %s' "$CONFIG"
+  fi
+}
+
+case "$SUBCOMMAND" in
+  secrets|s)
+    if ! has_cloudflare; then
+      printf 'No cloudflare section in tokens.yml, nothing to do.\n'
+      exit 0
+    fi
+
+    SECRETS=$(parse_yaml_list "$TOKENS_FILE" "cloudflare" "secret")
+
+    if [ -z "$SECRETS" ]; then
+      printf 'No secrets defined in cloudflare.secret.\n'
+      exit 0
+    fi
+
+    FAILED=0
+    printf '%s\n' "$SECRETS" | while IFS= read -r SECRET_KEY; do
+      [ -z "$SECRET_KEY" ] && continue
+
+      SECRET_VALUE="$(lookup_value "$SECRET_KEY")"
+
+      if [ -z "$SECRET_VALUE" ]; then
+        if [ "$FORCE" = "1" ]; then
+          printf 'Warning: %s is not set, skipping.\n' "$SECRET_KEY" >&2
+          continue
+        else
+          printf 'Error: %s is not set. Use --force to skip missing secrets.\n' "$SECRET_KEY" >&2
+          exit 1
+        fi
+      fi
+
+      printf 'Putting secret: %s\n' "$SECRET_KEY"
+      printf '%s' "$SECRET_VALUE" | npx wrangler secret put "$SECRET_KEY"$(config_args)
+    done
+    ;;
+
+  vars|variables|v)
+    if ! has_cloudflare; then
+      printf 'No cloudflare section in tokens.yml, nothing to do.\n'
+      exit 0
+    fi
+
+    VARIABLES=$(parse_yaml_list "$TOKENS_FILE" "cloudflare" "variable")
+
+    if [ -z "$VARIABLES" ]; then
+      printf 'No variables defined in cloudflare.variable.\n'
+      exit 0
+    fi
+
+    # Determine wrangler config file to append vars to
+    WRANGLER_FILE="$(resolve_config_file)"
+    if [ -z "$WRANGLER_FILE" ]; then
+      printf 'Error: no wrangler.toml found. Use --config to specify a path.\n' >&2
+      exit 1
+    fi
+    case "$WRANGLER_FILE" in
+      *.jsonc)
+        printf 'Error: %s is a JSONC config. Variables must be appended to a TOML config. Use --config to specify a wrangler.toml.\n' "$WRANGLER_FILE" >&2
+        exit 1
+        ;;
+    esac
+
+    printf '%s\n' "$VARIABLES" | while IFS= read -r VARIABLE_KEY; do
+      [ -z "$VARIABLE_KEY" ] && continue
+
+      VARIABLE_VALUE="$(lookup_value "$VARIABLE_KEY")"
+
+      if [ -z "$VARIABLE_VALUE" ]; then
+        if [ "$FORCE" = "1" ]; then
+          printf 'Warning: %s is not set, skipping.\n' "$VARIABLE_KEY" >&2
+          continue
+        else
+          printf 'Error: %s is not set. Use --force to skip missing variables.\n' "$VARIABLE_KEY" >&2
+          exit 1
+        fi
+      fi
+
+      printf 'Appending variable: %s\n' "$VARIABLE_KEY"
+      printf '\n[vars]\n%s = "%s"\n' "$VARIABLE_KEY" "$VARIABLE_VALUE" >> "$WRANGLER_FILE"
+    done
+
+    printf 'Deploying...\n'
+    npx wrangler deploy --config "$WRANGLER_FILE"
+    ;;
+
+  *)
+    printf 'Usage: pit-boss secrets|vars [options]\n'
+    printf '\n'
+    printf 'Subcommands:\n'
+    printf '  secrets, s              Push secrets to Cloudflare Workers\n'
+    printf '  vars, variables, v      Append variables to wrangler.toml and deploy\n'
+    printf '\n'
+    printf 'Options:\n'
+    printf '  --config, -c <path>     Path to wrangler.toml/wrangler.jsonc\n'
+    printf '  --tokens, -t <path>     Path to tokens.yml\n'
+    printf '  --env,    -e <dir>      Directory containing .env and .variables\n'
+    printf '  --value,  -v <pairs>    Inline KEY:value pairs (comma-separated); overrides sourced files\n'
+    printf '                          e.g. -v KEY:val  or  -v "KEY1:val, KEY2:val"\n'
+    printf '  --force,  -f            Skip missing secrets/variables instead of erroring\n'
+    printf '\n'
+    printf 'Resolution priority (config/tokens):\n'
+    printf '  1. Explicitly specified via --config / --tokens\n'
+    printf '  2. Sibling to the other specified option\n'
+    printf '  3. Current directory\n'
+    printf '\n'
+    printf 'Resolution priority (.env / .variables):\n'
+    printf '  0. --env directory\n'
+    printf '  1. Sibling to tokens.yml\n'
+    printf '  2. Sibling to config\n'
+    printf '  3. Current directory\n'
+    printf '  4. pit-boss root\n'
+    ;;
+esac
