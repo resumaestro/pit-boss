@@ -1,9 +1,16 @@
-name: Deploy
-description: Deploy a Cloudflare Worker via wrangler.
+name: deploy
+description: Deploy a Cloudflare worker and optionally set environment variables.
 
 inputs:
-  config:
-    description: Path to wrangler.toml or wrangler.jsonc
+  variable_keys:
+    description: JSON array of variable names to fetch from Oboist and inject into wrangler.toml
+    required: false
+    default: ""
+  proxy_url:
+    description: Oboist base URL
+    required: true
+  proxy_token:
+    description: Oboist bearer token
     required: true
 
 outputs:
@@ -17,9 +24,24 @@ runs:
     - name: Deploy
       id: deploy
       shell: bash
+      env:
+        PROXY_URL: ${{ inputs.proxy_url }}
+        PROXY_TOKEN: ${{ inputs.proxy_token }}
       run: |
         set +e
-        npx wrangler deploy --config "${{ inputs.config }}"
+        ARGS=()
+
+        if [[ -n '${{ inputs.variable_keys }}' && '${{ inputs.variable_keys }}' != '[]' ]]; then
+          while IFS= read -r name; do
+            value=$(curl --silent --show-error --fail-with-body \
+              "${PROXY_URL%/}/pit-boss/token?kind=variable&name=${name}" \
+              --header "Authorization: Bearer ${PROXY_TOKEN}" \
+              | jq -er '.value')
+            ARGS+=(--value "${name}:${value}")
+          done < <(printf '%s' '${{ inputs.variable_keys }}' | jq -r '.[]')
+        fi
+
+        sh "${{ github.action_path }}/../../bin/pit-boss" vars "${ARGS[@]}"
         EXIT=$?
 
         if [[ $EXIT -eq 0 ]]; then

@@ -8,12 +8,12 @@ inputs:
     default: tokens.yml
 
 outputs:
-  secrets:
+  secret_keys:
     description: JSON array of cloudflare secret names
-    value: ${{ steps.parse.outputs.secrets }}
-  variables:
+    value: ${{ steps.parse.outputs.secret_keys }}
+  variable_keys:
     description: JSON array of cloudflare variable names
-    value: ${{ steps.parse.outputs.variables }}
+    value: ${{ steps.parse.outputs.variable_keys }}
 
 runs:
   using: composite
@@ -24,5 +24,5 @@ runs:
       run: |
         secrets=$(yq -o=json '.cloudflare.secret // []' "${{ inputs.tokens }}")
         variables=$(yq -o=json '.cloudflare.variable // []' "${{ inputs.tokens }}")
-        echo "secrets=$secrets" >> "$GITHUB_OUTPUT"
-        echo "variables=$variables" >> "$GITHUB_OUTPUT"
+        echo "secret_keys=$secrets" >> "$GITHUB_OUTPUT"
+        echo "variable_keys=$variables" >> "$GITHUB_OUTPUT"

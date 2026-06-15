@@ -256,7 +256,7 @@ case "$SUBCOMMAND" in
     fi
 
     BODY="{\"secrets\":{${SECRETS_JSON}}}"
-    ENDPOINT="${OBOIST_URL%/}/pit-boss/secrets"
+    ENDPOINT="${OBOIST_URL%/}/pit-boss/secrets/push"
 
     printf 'Posting secrets to %s\n' "$ENDPOINT"
     RESPONSE="$(curl -s -w '\n%{http_code}' \
