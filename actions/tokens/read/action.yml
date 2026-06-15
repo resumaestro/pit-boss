@@ -22,7 +22,7 @@ runs:
       id: parse
       shell: bash
       run: |
-        secrets=$(yq -o=json '.cloudflare.secret // []' "${{ inputs.tokens }}")
-        variables=$(yq -o=json '.cloudflare.variable // []' "${{ inputs.tokens }}")
+        secrets=$(yq -o=json '.cloudflare.secret // []' "${{ inputs.tokens }}" | jq -c '.')
+        variables=$(yq -o=json '.cloudflare.variable // []' "${{ inputs.tokens }}" | jq -c '.')
         echo "secret_keys=$secrets" >> "$GITHUB_OUTPUT"
         echo "variable_keys=$variables" >> "$GITHUB_OUTPUT"
