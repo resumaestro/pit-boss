@@ -240,11 +240,6 @@ case "$SUBCOMMAND" in
 
     VARIABLES=$(parse_yaml_list "$TOKENS_FILE" "cloudflare" "variable")
 
-    if [ -z "$VARIABLES" ]; then
-      printf 'No variables defined in cloudflare.variable.\n'
-      exit 0
-    fi
-
     # Determine wrangler config file to append vars to
     WRANGLER_FILE="$(resolve_config_file)"
     if [ -z "$WRANGLER_FILE" ]; then
@@ -258,24 +253,42 @@ case "$SUBCOMMAND" in
         ;;
     esac
 
+    # Validate all keys exist before touching the file
     printf '%s\n' "$VARIABLES" | while IFS= read -r VARIABLE_KEY; do
       [ -z "$VARIABLE_KEY" ] && continue
-
       VARIABLE_VALUE="$(lookup_value "$VARIABLE_KEY")"
-
-      if [ -z "$VARIABLE_VALUE" ]; then
-        if [ "$FORCE" = "1" ]; then
-          printf 'Warning: %s is not set, skipping.\n' "$VARIABLE_KEY" >&2
-          continue
-        else
-          printf 'Error: %s is not set. Use --force to skip missing variables.\n' "$VARIABLE_KEY" >&2
-          exit 1
-        fi
+      if [ -z "$VARIABLE_VALUE" ] && [ "$FORCE" != "1" ]; then
+        printf 'Error: %s is not set. Use --force to skip missing variables.\n' "$VARIABLE_KEY" >&2
+        exit 1
       fi
+    done || exit 1
 
-      printf 'Appending variable: %s\n' "$VARIABLE_KEY"
-      printf '\n[vars]\n%s = "%s"\n' "$VARIABLE_KEY" "$VARIABLE_VALUE" >> "$WRANGLER_FILE"
-    done
+    # Build a single [vars] block for all resolved variables
+    VARS_BLOCK="$(printf '%s\n' "$VARIABLES" | while IFS= read -r VARIABLE_KEY; do
+      [ -z "$VARIABLE_KEY" ] && continue
+      VARIABLE_VALUE="$(lookup_value "$VARIABLE_KEY")"
+      if [ -z "$VARIABLE_VALUE" ]; then
+        printf 'Warning: %s is not set, skipping.\n' "$VARIABLE_KEY" >&2
+        continue
+      fi
+      printf '%s = "%s"\n' "$VARIABLE_KEY" "$VARIABLE_VALUE"
+    done)"
+
+    if [ -n "$VARS_BLOCK" ]; then
+      VARS_SECTION="$(printf '\n[vars]\n%s' "$VARS_BLOCK")"
+      LINE_COUNT="$(printf '%s' "$VARS_SECTION" | wc -l)"
+
+      # Restore wrangler file by stripping the appended block
+      _restore_wrangler() {
+        TOTAL_LINES="$(wc -l < "$WRANGLER_FILE")"
+        KEEP_LINES="$(( TOTAL_LINES - LINE_COUNT ))"
+        TMPFILE="$(mktemp)"
+        head -n "$KEEP_LINES" "$WRANGLER_FILE" > "$TMPFILE" && mv "$TMPFILE" "$WRANGLER_FILE"
+      }
+      trap '_restore_wrangler' EXIT INT TERM
+
+      printf '%s' "$VARS_SECTION" >> "$WRANGLER_FILE"
+    fi
 
     printf 'Deploying...\n'
     npx wrangler deploy --config "$WRANGLER_FILE"
