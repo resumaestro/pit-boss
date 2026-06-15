@@ -68,7 +68,7 @@ execute_database_sql() {
   local sql_file
   sql_file=$(mktemp)
 
-  printf '%s\n' "$sql" > "$sql_file"
+  printf '%s\n' "$sql" | tr '\n' ' ' > "$sql_file"
 
   if ! execute_database_file "$target" "$sql_file"; then
     rm -f "$sql_file"
