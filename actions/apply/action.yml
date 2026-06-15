@@ -41,7 +41,7 @@ runs:
         VERSION=""
 
         if [[ -f "$CONFIG" ]]; then
-          VERSION=$(yq -r '.operation_versions.apply // empty' "$CONFIG")
+          VERSION=$(yq -r '.operation_versions.apply // ""' "$CONFIG")
         fi
 
         if [[ -z "$VERSION" ]]; then

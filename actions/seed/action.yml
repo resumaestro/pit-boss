@@ -45,7 +45,7 @@ runs:
         MIGRATION_VERSION=""
 
         if [[ -f "$CONFIG" ]]; then
-          MIGRATION_VERSION=$(yq -r '.operation_versions.migration // empty' "$CONFIG")
+          MIGRATION_VERSION=$(yq -r '.operation_versions.migration // ""' "$CONFIG")
         fi
 
         arguments=(

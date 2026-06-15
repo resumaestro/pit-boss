@@ -56,7 +56,7 @@ runs:
           exit 0
         fi
 
-        TARGET=$(yq -r '.operation_versions.migration // empty' "$CONFIG")
+        TARGET=$(yq -r '.operation_versions.migration // ""' "$CONFIG")
 
         if [[ -z "$TARGET" ]]; then
           echo "::warning::$CONFIG is missing operation_versions.migration; skipping migration."
