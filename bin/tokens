@@ -1,37 +1,59 @@
 #!/bin/sh
-# pit-boss tokens subcommands: secrets and vars/variables
+# pit-boss tokens subcommand: secrets
 
 SUBCOMMAND="$1"
 shift 2>/dev/null || true
 
-CONFIG=""
-TOKENS=""
+URL_FLAG=""
+SECRET_FLAG=""
 ENV_FILE=""
 INLINE_VALUES=""
+INLINE_ALIAS=""
+KEY_FILTER=""
+ISOLATED=0
 FORCE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --config|-c)
-      CONFIG="$2"
+    --url|-u)
+      URL_FLAG="$2"
       shift 2
       ;;
-    --tokens|-t)
-      TOKENS="$2"
+    --secret|-s)
+      SECRET_FLAG="$2"
       shift 2
       ;;
     --env|-e)
       ENV_FILE="$2"
       shift 2
       ;;
-    --value|-v)
-      # Accumulate; may be passed multiple times
+    --tokens|--token|-t)
+      _alias="$1"
+      if [ -n "$INLINE_ALIAS" ] && [ "$INLINE_ALIAS" != "$_alias" ]; then
+        printf 'Error: cannot mix token flag aliases (%s and %s). Use one consistently.\n' "$INLINE_ALIAS" "$_alias" >&2
+        exit 1
+      fi
+      INLINE_ALIAS="$_alias"
       if [ -n "$INLINE_VALUES" ]; then
-        INLINE_VALUES="${INLINE_VALUES},${2}"
+        INLINE_VALUES="${INLINE_VALUES}
+${2}"
       else
         INLINE_VALUES="$2"
       fi
       shift 2
+      ;;
+    --keys|--key|-k)
+      if [ -n "$KEY_FILTER" ]; then
+        KEY_FILTER="${KEY_FILTER}
+${2}"
+      else
+        KEY_FILTER="$2"
+      fi
+      shift 2
+      ;;
+    --isolated|-i)
+      ISOLATED=1
+      shift
       ;;
     --force|-f)
       FORCE=1
@@ -44,332 +66,391 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# Resolve TOKENS_FILE with priority: --tokens > sibling of --config > current dir
-resolve_tokens_file() {
-  if [ -n "$TOKENS" ]; then
-    printf '%s' "$TOKENS"
-    return
-  fi
-  if [ -n "$CONFIG" ]; then
-    _sibling="$(dirname "$CONFIG")/tokens.yml"
-    if [ -f "$_sibling" ]; then
-      printf '%s' "$_sibling"
-      return
-    fi
-  fi
-  printf '%s' "tokens.yml"
-}
-
-# Resolve CONFIG with priority: --config > sibling of --tokens > current dir (vars only)
-resolve_config_file() {
-  if [ -n "$CONFIG" ]; then
-    printf '%s' "$CONFIG"
-    return
-  fi
-  if [ -n "$TOKENS" ]; then
-    _dir="$(dirname "$TOKENS")"
-    if [ -f "$_dir/wrangler.toml" ]; then
-      printf '%s' "$_dir/wrangler.toml"
-      return
-    fi
-    if [ -f "$_dir/wrangler.jsonc" ]; then
-      printf '%s' "$_dir/wrangler.jsonc"
-      return
-    fi
-  fi
-  if [ -f "wrangler.toml" ]; then
-    printf '%s' "wrangler.toml"
-    return
-  fi
-  if [ -f "wrangler.jsonc" ]; then
-    printf '%s' "wrangler.jsonc"
-    return
-  fi
-  printf ''
-}
-
 PIT_BOSS_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-TOKENS_FILE="$(resolve_tokens_file)"
-if [ ! -f "$TOKENS_FILE" ]; then
-  printf 'Error: tokens.yml not found (looked at: %s)\n' "$TOKENS_FILE" >&2
-  exit 1
-fi
+# Normalize a raw token/key string into newline-separated KEY=VALUE or KEY pairs.
+# Separators: newline, comma, semicolon, space (already split by shell if unquoted).
+# KV separators: = or :
+normalize_pairs() {
+  printf '%s' "$1" | sed 's/[,;]/\n/g' | sed 's/^ *//;s/ *$//' | grep -v '^$'
+}
 
-
-# Parse --value/-v inline pairs into a portable lookup string
-# Format stored: \nKEY\nVALUE\nKEY\nVALUE...
-INLINE_KV=""
-if [ -n "$INLINE_VALUES" ]; then
-  _pairs="$(printf '%s' "$INLINE_VALUES" | sed 's/ *, */,/g')"
+# Parse normalized lines into INLINE_KV format: \nKEY\nVALUE\n...
+# Returns: sets _out_kv
+parse_kv_lines() {
+  _raw="$1"
+  _out_kv=""
   _IFS_SAVE="$IFS"
-  IFS=','
-  for _pair in $_pairs; do
+  IFS='
+'
+  for _line in $(printf '%s\n' "$_raw"); do
     IFS="$_IFS_SAVE"
-    _pair="$(printf '%s' "$_pair" | sed 's/^ *//;s/ *$//')"
-    [ -z "$_pair" ] && continue
-    _key="${_pair%%:*}"
-    _val="${_pair#*:}"
-    if [ -z "$_key" ] || [ "$_key" = "$_pair" ]; then
-      printf 'Error: invalid --value format "%s" (expected KEY:value)\n' "$_pair" >&2
+    _line="$(printf '%s' "$_line" | sed 's/^ *//;s/ *$//')"
+    [ -z "$_line" ] && continue
+    # Try = first, then :
+    if printf '%s' "$_line" | grep -q '='; then
+      _k="${_line%%=*}"
+      _v="${_line#*=}"
+    elif printf '%s' "$_line" | grep -q ':'; then
+      _k="${_line%%:*}"
+      _v="${_line#*:}"
+    else
+      printf 'Error: invalid token format "%s" (expected KEY=value or KEY:value)\n' "$_line" >&2
       exit 1
     fi
-    INLINE_KV="${INLINE_KV}
-${_key}
-${_val}"
+    _k="$(printf '%s' "$_k" | sed 's/^ *//;s/ *$//')"
+    _v="$(printf '%s' "$_v" | sed 's/^ *//;s/ *$//')"
+    if [ -z "$_k" ]; then
+      printf 'Error: empty key in token "%s"\n' "$_line" >&2
+      exit 1
+    fi
+    _out_kv="${_out_kv}
+${_k}
+${_v}"
   done
   IFS="$_IFS_SAVE"
-fi
-
-# Build the ordered list of env files to search per-key:
-#   0. --value inline (checked first, before any file)
-#   1. --env file (explicit path)
-#   2. sibling of tokens.yml
-#   3. sibling of config
-#   4. current directory
-#   5. pit-boss root
-_tokens_dir="$(dirname "$TOKENS_FILE")"
-_config_dir=""
-[ -n "$CONFIG" ] && _config_dir="$(dirname "$CONFIG")"
-
-ENV_FILES=""
-_add_env_file() {
-  _f="$1"
-  case "$ENV_FILES" in
-    *"$_f"*) ;;
-    *) [ -f "$_f" ] && ENV_FILES="${ENV_FILES} $_f" ;;
-  esac
+  printf '%s' "$_out_kv"
 }
 
-if [ -n "$ENV_FILE" ]; then
-  if [ ! -f "$ENV_FILE" ]; then
-    printf 'Error: env file not found: %s\n' "$ENV_FILE" >&2
-    exit 1
-  fi
-  _add_env_file "$ENV_FILE"
-fi
-
-for _dir in "$_tokens_dir" ${_config_dir:+"$_config_dir"} "." "$PIT_BOSS_ROOT"; do
-  for _name in ".env" ".variables"; do
-    _add_env_file "$_dir/$_name"
-  done
-done
-
-# Look up a key with per-key priority:
-#   0. --value/-v inline pairs
-#   1-4. each env file in priority order
-lookup_value() {
-  _lkey="$1"
-
-  # Check inline KV pairs first
-  if [ -n "$INLINE_KV" ]; then
-    _iv="$(printf '%s\n' "$INLINE_KV" | awk -v k="$_lkey" 'found{print;exit} $0==k{found=1}')"
-    if [ -n "$_iv" ]; then
-      printf '%s' "$_iv"
-      return
-    fi
-  fi
-
-  # Walk env files in priority order, stop at first file containing the key
-  for _file in $ENV_FILES; do
-    _v="$(grep -m1 "^${_lkey}=" "$_file" 2>/dev/null | cut -d= -f2- | sed 's/^"//;s/"$//')"
-    if [ -n "$_v" ]; then
-      printf '%s' "$_v"
-      return
-    fi
-  done
+# Look up a key in a KV string (format: \nKEY\nVALUE\n...)
+kv_lookup() {
+  _kv="$1"
+  _key="$2"
+  printf '%s\n' "$_kv" | awk -v k="$_key" 'found{print;exit} $0==k{found=1}'
 }
 
-# Parse a YAML list under a dotted path like "cloudflare.secret" or "cloudflare.variable"
-# Outputs one item per line
-parse_yaml_list() {
+# Check if a key exists in a KV string
+kv_has() {
+  _v="$(kv_lookup "$1" "$2")"
+  [ -n "$_v" ]
+}
+
+# Merge src KV into dst KV; dst wins on duplicate keys
+kv_merge() {
+  _dst="$1"
+  _src="$2"
+  _result="$_dst"
+  _IFS_SAVE="$IFS"
+  IFS='
+'
+  _reading_key=0
+  _cur_key=""
+  for _tok in $(printf '%s\n' "$_src"); do
+    IFS="$_IFS_SAVE"
+    [ -z "$_tok" ] && continue
+    if [ "$_reading_key" = "0" ]; then
+      _cur_key="$_tok"
+      _reading_key=1
+    else
+      if ! kv_has "$_result" "$_cur_key"; then
+        _result="${_result}
+${_cur_key}
+${_tok}"
+      fi
+      _reading_key=0
+      _cur_key=""
+    fi
+  done
+  IFS="$_IFS_SAVE"
+  printf '%s' "$_result"
+}
+
+# Parse KEY=VALUE lines from an env file into KV string, skipping keys starting with _
+# (unless include_private=1)
+parse_env_file() {
   _file="$1"
-  _section="$2"   # e.g. "cloudflare"
-  _key="$3"       # e.g. "secret" or "variable"
-
-  awk -v section="$_section:" -v key="$_key:" '
-    /^[^ ]/ { in_section = ($0 == section) }
-    in_section && /^  [^ ]/ { in_key = ($0 ~ "^  " key) }
-    in_section && in_key && /^    - / {
-      sub(/^    - /, ""); print
-    }
-    in_section && in_key && /^  [^ ]/ && !/^  '"$_key"':/ { in_key = 0 }
-  ' "$_file"
+  _include_private="${2:-0}"
+  _result=""
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    case "$_line" in
+      ''|'#'*) continue ;;
+    esac
+    _k="${_line%%=*}"
+    _v="${_line#*=}"
+    _v="$(printf '%s' "$_v" | sed 's/^"//;s/"$//')"
+    [ -z "$_k" ] || [ -z "$_v" ] && continue
+    if [ "$_include_private" = "0" ]; then
+      case "$_k" in
+        _*) continue ;;
+      esac
+    fi
+    _result="${_result}
+${_k}
+${_v}"
+  done < "$_file"
+  printf '%s' "$_result"
 }
 
-# Check if cloudflare section exists
-has_cloudflare() {
-  grep -q '^cloudflare:' "$TOKENS_FILE"
+# Lookup a key across env files with underscore-prefixed priority
+# lookup_auth KEY file1 file2 ...
+lookup_auth() {
+  _akey="$1"
+  shift
+  for _f in "$@"; do
+    [ -f "$_f" ] || continue
+    _v="$(grep -m1 "^_${_akey}=" "$_f" 2>/dev/null | cut -d= -f2- | sed 's/^"//;s/"$//')"
+    [ -n "$_v" ] && { printf '%s' "$_v"; return; }
+  done
+  for _f in "$@"; do
+    [ -f "$_f" ] || continue
+    _v="$(grep -m1 "^${_akey}=" "$_f" 2>/dev/null | cut -d= -f2- | sed 's/^"//;s/"$//')"
+    [ -n "$_v" ] && { printf '%s' "$_v"; return; }
+  done
 }
 
-# Build wrangler config args
-config_args() {
-  if [ -n "$CONFIG" ]; then
-    printf ' --config %s' "$CONFIG"
-  fi
+# Normalize --keys/-k input into newline-separated key names
+normalize_keys() {
+  printf '%s' "$1" | sed 's/[,;]/\n/g' | sed 's/^ *//;s/ *$//' | grep -v '^$'
 }
 
 case "$SUBCOMMAND" in
   secrets|s)
-    OBOIST_URL="$(lookup_value "OBOIST_URL")"
-    OBOIST_SECRET="$(lookup_value "OBOIST_SECRET")"
-
-    if [ -z "$OBOIST_URL" ]; then
-      printf 'Error: OBOIST_URL is not set in any env file.\n' >&2
-      exit 1
-    fi
-    if [ -z "$OBOIST_SECRET" ]; then
-      printf 'Error: OBOIST_SECRET is not set in any env file.\n' >&2
-      exit 1
+    # --- Build inline KV (--tokens/-t flags) ---
+    INLINE_KV=""
+    if [ -n "$INLINE_VALUES" ]; then
+      _normalized="$(normalize_pairs "$INLINE_VALUES")"
+      INLINE_KV="$(parse_kv_lines "$_normalized")"
     fi
 
-    # Collect all KEY=VALUE pairs from env files (skip OBOIST_* and blank/comment lines)
-    SECRETS_JSON=''
-    for _file in $ENV_FILES; do
-      while IFS= read -r _line || [ -n "$_line" ]; do
-        # Skip blank lines and comments
-        case "$_line" in
-          ''|'#'*) continue ;;
-        esac
-        _key="${_line%%=*}"
-        _val="${_line#*=}"
-        # Strip surrounding quotes from value
-        _val="$(printf '%s' "$_val" | sed 's/^"//;s/"$//')"
-        # Skip OBOIST_* keys (they're auth, not secrets to push)
-        case "$_key" in
-          OBOIST_*) continue ;;
-        esac
-        [ -z "$_key" ] || [ -z "$_val" ] && continue
-        # Escape value for JSON (backslash, double-quote, newline, tab)
-        _val_escaped="$(printf '%s' "$_val" | sed 's/\\/\\\\/g;s/"/\\"/g;s/	/\\t/g')"
-        if [ -n "$SECRETS_JSON" ]; then
-          SECRETS_JSON="${SECRETS_JSON},\"${_key}\":\"${_val_escaped}\""
-        else
-          SECRETS_JSON="\"${_key}\":\"${_val_escaped}\""
+    # --- Read piped stdin ---
+    PIPED_KV=""
+    if [ ! -t 0 ]; then
+      _piped_raw="$(cat)"
+      if [ -n "$_piped_raw" ]; then
+        _normalized="$(normalize_pairs "$_piped_raw")"
+        PIPED_KV="$(parse_kv_lines "$_normalized")"
+      fi
+    fi
+
+    # --- Resolve env files ---
+    ENV_FILES=""
+    _add_env() {
+      _f="$1"
+      case "$ENV_FILES" in *"$_f"*) ;; *) [ -f "$_f" ] && ENV_FILES="${ENV_FILES} $_f" ;; esac
+    }
+    [ -n "$ENV_FILE" ] && { [ -f "$ENV_FILE" ] || { printf 'Error: env file not found: %s\n' "$ENV_FILE" >&2; exit 1; }; _add_env "$ENV_FILE"; }
+    _add_env "./.env"
+    _add_env "${PIT_BOSS_ROOT}/.env"
+    _add_env "${PIT_BOSS_ROOT}/bin/.env"
+
+    # --- Resolve PROXY_URL and PROXY_SECRET ---
+    PROXY_URL="$URL_FLAG"
+    PROXY_SECRET="$SECRET_FLAG"
+
+    if [ -z "$PROXY_URL" ]; then
+      # Check inline/piped first with underscore priority
+      for _prefix in "_PROXY_URL" "PROXY_URL"; do
+        if kv_has "$INLINE_KV" "$_prefix"; then
+          PROXY_URL="$(kv_lookup "$INLINE_KV" "$_prefix")"
+          break
         fi
-      done < "$_file"
+        if kv_has "$PIPED_KV" "$_prefix"; then
+          PROXY_URL="$(kv_lookup "$PIPED_KV" "$_prefix")"
+          break
+        fi
+      done
+    fi
+    if [ -z "$PROXY_URL" ]; then
+      PROXY_URL="$(lookup_auth "PROXY_URL" $ENV_FILES)"
+    fi
+
+    if [ -z "$PROXY_SECRET" ]; then
+      for _prefix in "_PROXY_SECRET" "PROXY_SECRET"; do
+        if kv_has "$INLINE_KV" "$_prefix"; then
+          PROXY_SECRET="$(kv_lookup "$INLINE_KV" "$_prefix")"
+          break
+        fi
+        if kv_has "$PIPED_KV" "$_prefix"; then
+          PROXY_SECRET="$(kv_lookup "$PIPED_KV" "$_prefix")"
+          break
+        fi
+      done
+    fi
+    if [ -z "$PROXY_SECRET" ]; then
+      PROXY_SECRET="$(lookup_auth "PROXY_SECRET" $ENV_FILES)"
+    fi
+
+    if [ -z "$PROXY_URL" ]; then
+      printf 'Error: PROXY_URL is not set.\n' >&2
+      exit 1
+    fi
+    if [ -z "$PROXY_SECRET" ]; then
+      printf 'Error: PROXY_SECRET is not set.\n' >&2
+      exit 1
+    fi
+
+    # --- Build final secrets KV ---
+    # Inline and piped always included; merge in order (inline wins over piped)
+    SECRETS_KV="$(kv_merge "$INLINE_KV" "$PIPED_KV")"
+
+    if [ "$ISOLATED" = "1" ]; then
+      # In isolated mode, inline+piped are always included (fused tier 1).
+      # If they have content, skip file sources. Otherwise walk files and stop at first hit.
+      if [ -z "$SECRETS_KV" ]; then
+        if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
+          _fkv="$(parse_env_file "$ENV_FILE")"
+          [ -n "$_fkv" ] && SECRETS_KV="$_fkv"
+        fi
+        if [ -z "$SECRETS_KV" ]; then
+          for _f in "./.env" "${PIT_BOSS_ROOT}/.env" "${PIT_BOSS_ROOT}/bin/.env"; do
+            [ -f "$_f" ] || continue
+            _fkv="$(parse_env_file "$_f")"
+            if [ -n "$_fkv" ]; then
+              SECRETS_KV="$_fkv"
+              break
+            fi
+          done
+        fi
+      fi
+    else
+      # Additive: merge all file sources
+      if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
+        _fkv="$(parse_env_file "$ENV_FILE")"
+        SECRETS_KV="$(kv_merge "$SECRETS_KV" "$_fkv")"
+      fi
+      for _f in "./.env" "${PIT_BOSS_ROOT}/.env" "${PIT_BOSS_ROOT}/bin/.env"; do
+        [ -f "$_f" ] || continue
+        _fkv="$(parse_env_file "$_f")"
+        SECRETS_KV="$(kv_merge "$SECRETS_KV" "$_fkv")"
+      done
+    fi
+
+    # --- Apply -k/--keys filter ---
+    if [ -n "$KEY_FILTER" ]; then
+      NORMALIZED_KEYS="$(normalize_keys "$KEY_FILTER")"
+      FILTERED_KV=""
+      _IFS_SAVE="$IFS"
+      IFS='
+'
+      for _k in $NORMALIZED_KEYS; do
+        IFS="$_IFS_SAVE"
+        [ -z "$_k" ] && continue
+        if kv_has "$SECRETS_KV" "$_k"; then
+          _v="$(kv_lookup "$SECRETS_KV" "$_k")"
+          FILTERED_KV="${FILTERED_KV}
+${_k}
+${_v}"
+        else
+          if [ "$FORCE" = "1" ]; then
+            printf 'Warning: key "%s" not found, skipping.\n' "$_k" >&2
+          else
+            printf 'Error: key "%s" not found. Use --force to skip missing keys.\n' "$_k" >&2
+            exit 1
+          fi
+        fi
+      done
+      IFS="$_IFS_SAVE"
+      SECRETS_KV="$FILTERED_KV"
+    fi
+
+    # --- Build JSON and POST ---
+    SECRETS_JSON=""
+    _IFS_SAVE="$IFS"
+    IFS='
+'
+    _reading_key=0
+    _cur_key=""
+    for _tok in $(printf '%s\n' "$SECRETS_KV"); do
+      IFS="$_IFS_SAVE"
+      [ -z "$_tok" ] && continue
+      if [ "$_reading_key" = "0" ]; then
+        _cur_key="$_tok"
+        _reading_key=1
+      else
+        _val_escaped="$(printf '%s' "$_tok" | sed 's/\\/\\\\/g;s/"/\\"/g;s/	/\\t/g')"
+        if [ -n "$SECRETS_JSON" ]; then
+          SECRETS_JSON="${SECRETS_JSON},\"${_cur_key}\":\"${_val_escaped}\""
+        else
+          SECRETS_JSON="\"${_cur_key}\":\"${_val_escaped}\""
+        fi
+        _reading_key=0
+        _cur_key=""
+      fi
     done
+    IFS="$_IFS_SAVE"
 
     if [ -z "$SECRETS_JSON" ]; then
-      printf 'No secrets found in env files.\n'
+      printf 'No secrets found.\n'
       exit 0
     fi
 
     BODY="{\"secrets\":{${SECRETS_JSON}}}"
-    ENDPOINT="${OBOIST_URL%/}/pit-boss/secrets/push"
+    ENDPOINT="${PROXY_URL%/}/pit-boss/secrets/push"
 
     printf 'Posting secrets to %s\n' "$ENDPOINT"
     RESPONSE="$(curl -s -w '\n%{http_code}' \
       -X POST "$ENDPOINT" \
-      -H "Authorization: Bearer ${OBOIST_SECRET}" \
+      -H "Authorization: Bearer ${PROXY_SECRET}" \
       -H "Content-Type: application/json" \
       -d "$BODY")"
 
-    HTTP_BODY="$(printf '%s' "$RESPONSE" | head -n -1)"
     HTTP_STATUS="$(printf '%s' "$RESPONSE" | tail -n 1)"
-
-    printf '%s\n' "$HTTP_BODY"
+    HTTP_BODY="$(printf '%s' "$RESPONSE" | sed '$d')"
 
     case "$HTTP_STATUS" in
-      200) exit 0 ;;
-      207)
-        printf 'Warning: some secrets failed to push (HTTP 207).\n' >&2
-        exit 1
+      200|207)
+        _ok_count=0
+        _fail_count=0
+        _IFS_SAVE="$IFS"
+        IFS='
+'
+        for _entry in $(printf '%s' "$HTTP_BODY" | sed 's/},{/}|{/g' | tr '|' '\n'); do
+          _name="$(printf '%s' "$_entry" | sed 's/.*"name":"\([^"]*\)".*/\1/')"
+          _entry_ok="$(printf '%s' "$_entry" | sed 's/.*"ok":\([a-z]*\).*/\1/')"
+          if [ "$_entry_ok" = "true" ]; then
+            _ok_count=$(( _ok_count + 1 ))
+            printf '  ok  %s\n' "$_name"
+          else
+            _fail_count=$(( _fail_count + 1 ))
+            _cf_error="$(printf '%s' "$_entry" | sed 's/.*"error":"//;s/"}]*//')"
+            _cf_summary="$(printf '%s' "$_cf_error" | sed 's/\[{\\".*//' | sed 's/^ *//;s/ *$//')"
+            _cf_code="$(printf '%s' "$_cf_error" | sed 's/.*\\"code\\":\([0-9]*\).*/\1/')"
+            _cf_message="$(printf '%s' "$_cf_error" | sed 's/.*\\"message\\":\\"//;s/\\"}.*//')"
+            printf '\033[31mERR %s\033[0m %s\n' "$_name" "$_cf_summary" >&2
+            printf '  \033[1m%s\033[0m %s\n' "$_cf_code" "$_cf_message" >&2
+          fi
+        done
+        IFS="$_IFS_SAVE"
+        if [ "$_fail_count" -gt 0 ]; then
+          printf '\n\033[1;31m%d pushed, %d failed.\033[0m\n' "$_ok_count" "$_fail_count"
+        else
+          printf '\n\033[1;32m%d pushed, %d failed.\033[0m\n' "$_ok_count" "$_fail_count"
+        fi
+        [ "$_fail_count" -gt 0 ] && exit 1 || exit 0
         ;;
       *)
-        printf 'Error: oboist returned HTTP %s.\n' "$HTTP_STATUS" >&2
+        printf 'Error: proxy returned HTTP %s.\n' "$HTTP_STATUS" >&2
+        printf '%s\n' "$HTTP_BODY" >&2
         exit 1
         ;;
     esac
-    ;;
-
-  vars|variables|v)
-    if ! has_cloudflare; then
-      printf 'No cloudflare section in tokens.yml, nothing to do.\n'
-      exit 0
-    fi
-
-    VARIABLES=$(parse_yaml_list "$TOKENS_FILE" "cloudflare" "variable")
-
-    # Determine wrangler config file to append vars to
-    WRANGLER_FILE="$(resolve_config_file)"
-    if [ -z "$WRANGLER_FILE" ]; then
-      printf 'Error: no wrangler.toml found. Use --config to specify a path.\n' >&2
-      exit 1
-    fi
-    case "$WRANGLER_FILE" in
-      *.jsonc)
-        printf 'Error: %s is a JSONC config. Variables must be appended to a TOML config. Use --config to specify a wrangler.toml.\n' "$WRANGLER_FILE" >&2
-        exit 1
-        ;;
-    esac
-
-    # Validate all keys exist before touching the file
-    printf '%s\n' "$VARIABLES" | while IFS= read -r VARIABLE_KEY; do
-      [ -z "$VARIABLE_KEY" ] && continue
-      VARIABLE_VALUE="$(lookup_value "$VARIABLE_KEY")"
-      if [ -z "$VARIABLE_VALUE" ] && [ "$FORCE" != "1" ]; then
-        printf 'Error: %s is not set. Use --force to skip missing variables.\n' "$VARIABLE_KEY" >&2
-        exit 1
-      fi
-    done || exit 1
-
-    # Build a single [vars] block for all resolved variables
-    VARS_BLOCK="$(printf '%s\n' "$VARIABLES" | while IFS= read -r VARIABLE_KEY; do
-      [ -z "$VARIABLE_KEY" ] && continue
-      VARIABLE_VALUE="$(lookup_value "$VARIABLE_KEY")"
-      if [ -z "$VARIABLE_VALUE" ]; then
-        printf 'Warning: %s is not set, skipping.\n' "$VARIABLE_KEY" >&2
-        continue
-      fi
-      printf '%s = "%s"\n' "$VARIABLE_KEY" "$VARIABLE_VALUE"
-    done)"
-
-    if [ -n "$VARS_BLOCK" ]; then
-      VARS_SECTION="$(printf '\n[vars]\n%s' "$VARS_BLOCK")"
-      LINE_COUNT="$(printf '%s' "$VARS_SECTION" | wc -l)"
-
-      # Restore wrangler file by stripping the appended block
-      _restore_wrangler() {
-        TOTAL_LINES="$(wc -l < "$WRANGLER_FILE")"
-        KEEP_LINES="$(( TOTAL_LINES - LINE_COUNT ))"
-        TMPFILE="$(mktemp)"
-        head -n "$KEEP_LINES" "$WRANGLER_FILE" > "$TMPFILE" && mv "$TMPFILE" "$WRANGLER_FILE"
-      }
-      trap '_restore_wrangler' EXIT INT TERM
-
-      printf '%s' "$VARS_SECTION" >> "$WRANGLER_FILE"
-    fi
-
-    printf 'Deploying...\n'
-    npx wrangler deploy --config "$WRANGLER_FILE"
     ;;
 
   *)
-    printf 'Usage: pit-boss secrets|vars [options]\n'
-    printf '\n'
-    printf 'Subcommands:\n'
-    printf '  secrets, s              Push secrets to Cloudflare Workers\n'
-    printf '  vars, variables, v      Append variables to wrangler.toml and deploy\n'
+    printf 'Usage: pit-boss secrets [options]\n'
     printf '\n'
     printf 'Options:\n'
-    printf '  --config, -c <path>     Path to wrangler.toml/wrangler.jsonc\n'
-    printf '  --tokens, -t <path>     Path to tokens.yml\n'
-    printf '  --env,    -e <file>     Path to a .env file (secrets: overrides default discovery)\n'
-    printf '  --value,  -v <pairs>    Inline KEY:value pairs (comma-separated); overrides sourced files\n'
-    printf '                          e.g. -v KEY:val  or  -v "KEY1:val, KEY2:val"\n'
-    printf '  --force,  -f            Skip missing secrets/variables instead of erroring\n'
+    printf '  --url,      -u <url>      Proxy URL (overrides PROXY_URL / _PROXY_URL)\n'
+    printf '  --secret,   -s <secret>   Proxy secret (overrides PROXY_SECRET / _PROXY_SECRET)\n'
+    printf '  --env,      -e <file>     Path to a .env file\n'
+    printf '  --tokens/--token/-t <kv>  Inline KEY=value or KEY:value pairs; may be passed\n'
+    printf '                            multiple times; separators: comma, semicolon, newline\n'
+    printf '                            All aliases used must match (cannot mix --token/--tokens)\n'
+    printf '  --keys/--key/-k <keys>    Only send these keys; separators: comma, semicolon,\n'
+    printf '                            newline, space (when quoted); may be passed multiple times\n'
+    printf '  --isolated, -i            Stop at first source tier that yields content\n'
+    printf '                            (inline+piped are always fused as tier 1)\n'
+    printf '  --force,    -f            Warn instead of error on missing --keys entries\n'
     printf '\n'
-    printf 'Resolution priority (config/tokens):\n'
-    printf '  1. Explicitly specified via --config / --tokens\n'
-    printf '  2. Sibling to the other specified option\n'
-    printf '  3. Current directory\n'
+    printf 'Source priority (additive by default; -i stops at first hit):\n'
+    printf '  1. --tokens/-t inline\n'
+    printf '  2. piped stdin (echo KEY=val | pit-boss secrets)\n'
+    printf '  3. --env file\n'
+    printf '  4. .env in current directory\n'
+    printf '  5. .env in pit-boss root\n'
+    printf '  6. .env in pit-boss/bin\n'
     printf '\n'
-    printf 'Resolution priority (.env / .variables):\n'
-    printf '  0. --env directory\n'
-    printf '  1. Sibling to tokens.yml\n'
-    printf '  2. Sibling to config\n'
-    printf '  3. Current directory\n'
-    printf '  4. pit-boss root\n'
+    printf 'Auth key lookup (_PROXY_* takes priority over PROXY_*):\n'
+    printf '  --url/-u and --secret/-s flags take top priority, then sources in order above.\n'
     ;;
 esac

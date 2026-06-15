@@ -29,7 +29,7 @@ case "$COMMAND" in
   pre-commit)
     sh "$SCRIPT_DIR/pre-commit/resolve-seed-max.sh" "$@"
     ;;
-  secrets|s|vars|variables|v)
+  secrets|s)
     sh "$SCRIPT_DIR/bin/tokens" "$COMMAND" "$@"
     ;;
   ""|--help|-h)
@@ -45,10 +45,6 @@ case "$COMMAND" in
     printf '  apply run [options]       Apply a versioned config through Oboist\n'
     printf '  pre-commit                Resolve open MIGRATION_MAX values (run as hook)\n'
     printf '  secrets, s [options]      Push secrets from .env to Cloudflare via oboist\n'
-    printf '  vars, variables, v [opt]  Append variables to wrangler.toml and deploy\n'
-    printf '    -c/--config <path>        wrangler config (sibling tokens.yml auto-found)\n'
-    printf '    -t/--tokens <path>        tokens.yml (sibling wrangler config auto-found)\n'
-    printf '    -f/--force                skip missing values instead of erroring\n'
     ;;
   *)
     printf 'Unknown command: %s\n' "$COMMAND" >&2
