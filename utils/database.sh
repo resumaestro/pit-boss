@@ -41,7 +41,7 @@ request_proxy_operation() {
       --show-error \
       --fail-with-body \
       --request POST \
-      "${PROXY_URL%/}/${target}/operation" \
+      "${PROXY_URL%/}/operation/${target}" \
       --header "Authorization: Bearer ${PROXY_TOKEN}" \
       --header "Content-Type: application/json" \
       --data-binary @- \
@@ -107,7 +107,7 @@ create_database_snapshot() {
       --show-error \
       --fail-with-body \
       --request POST \
-      "${PROXY_URL%/}/${target}/snapshots/create" \
+      "${PROXY_URL%/}/snapshot/${target}" \
       --header "Authorization: Bearer ${PROXY_TOKEN}" \
       --header "Content-Type: application/json" \
       --data-binary @- \
