@@ -58,24 +58,41 @@ request_proxy_operation() {
 execute_database_file() {
   local target="$1"
   local sql_file="$2"
-  local stmt_file stmt
+
+  # Strip inline and full-line comments, then split on ; and send each statement
+  # as a separate request so D1 commits schema changes between statements.
+  local stripped_file stmt_file
+  stripped_file=$(mktemp)
   stmt_file=$(mktemp)
 
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" =~ ^[[:space:]]*-- ]] && continue
-    printf '%s\n' "$line"
-  done < "$sql_file" \
-    | tr '\n' ' ' \
-    | tr ';' '\n' \
-    | while IFS= read -r stmt || [[ -n "$stmt" ]]; do
-        stmt="${stmt#"${stmt%%[![:space:]]*}"}"
-        stmt="${stmt%"${stmt##*[![:space:]]}"}"
-        [[ -z "$stmt" ]] && continue
-        printf '%s' "$stmt" > "$stmt_file"
-        request_proxy_operation "$target" "exec" "$stmt_file" > /dev/null
-      done
+  # Remove -- comments (inline and full-line) from each line
+  sed 's/--.*$//' "$sql_file" > "$stripped_file"
 
-  rm -f "$stmt_file"
+  # Split on semicolons, trim whitespace, send each non-empty statement
+  local buf=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    while [[ "$line" == *";"* ]]; do
+      buf="${buf} ${line%%";"*}"
+      buf="${buf#"${buf%%[![:space:]]*}"}"
+      buf="${buf%"${buf##*[![:space:]]}"}"
+      if [[ -n "$buf" ]]; then
+        printf '%s' "$buf" > "$stmt_file"
+        request_proxy_operation "$target" "exec" "$stmt_file" > /dev/null
+      fi
+      buf=""
+      line="${line#*";"}"
+    done
+    buf="${buf} ${line}"
+  done < "$stripped_file"
+
+  buf="${buf#"${buf%%[![:space:]]*}"}"
+  buf="${buf%"${buf##*[![:space:]]}"}"
+  if [[ -n "$buf" ]]; then
+    printf '%s' "$buf" > "$stmt_file"
+    request_proxy_operation "$target" "exec" "$stmt_file" > /dev/null
+  fi
+
+  rm -f "$stripped_file" "$stmt_file"
 }
 
 execute_database_sql() {
