@@ -58,8 +58,24 @@ request_proxy_operation() {
 execute_database_file() {
   local target="$1"
   local sql_file="$2"
+  local stmt_file stmt
+  stmt_file=$(mktemp)
 
-  request_proxy_operation "$target" "exec" "$sql_file"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*-- ]] && continue
+    printf '%s\n' "$line"
+  done < "$sql_file" \
+    | tr '\n' ' ' \
+    | tr ';' '\n' \
+    | while IFS= read -r stmt || [[ -n "$stmt" ]]; do
+        stmt="${stmt#"${stmt%%[![:space:]]*}"}"
+        stmt="${stmt%"${stmt##*[![:space:]]}"}"
+        [[ -z "$stmt" ]] && continue
+        printf '%s' "$stmt" > "$stmt_file"
+        request_proxy_operation "$target" "exec" "$stmt_file" > /dev/null
+      done
+
+  rm -f "$stmt_file"
 }
 
 execute_database_sql() {
