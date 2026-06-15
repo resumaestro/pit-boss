@@ -1,0 +1,49 @@
+name: Provision
+description: Apply migrations and seeds to production in the correct interleaved order.
+
+inputs:
+  production_target:
+    description: Production database name
+    required: true
+  staging_target:
+    description: Staging database name to update after successful production apply; omit to skip
+    required: false
+    default: ""
+  provision_dir:
+    description: Directory containing provision files (migrations, seeds)
+    required: false
+    default: provision
+  proxy_url:
+    description: Oboist base URL
+    required: true
+  proxy_token:
+    description: Oboist bearer token
+    required: true
+
+outputs:
+  passed:
+    description: Whether provisioning succeeded
+    value: ${{ steps.provision.outputs.passed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Provision
+      id: provision
+      shell: bash
+      env:
+        PROXY_TOKEN: ${{ inputs.proxy_token }}
+        PROXY_URL: ${{ inputs.proxy_url }}
+      run: |
+        set +e
+        bash "${{ github.action_path }}/provision.sh" \
+          --production-target "${{ inputs.production_target }}" \
+          --staging-target "${{ inputs.staging_target }}" \
+          --provision-dir "${{ inputs.provision_dir }}"
+        EXIT=$?
+        if [[ $EXIT -eq 0 ]]; then
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "passed=false" >> "$GITHUB_OUTPUT"
+        fi
+        exit $EXIT

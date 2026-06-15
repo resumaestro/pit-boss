@@ -1,0 +1,10 @@
+github:
+  scope:
+    - repo
+    - secrets
+
+oboist:
+  vars:
+    - PROXY_URL
+  secrets:
+    - PROXY_TOKEN

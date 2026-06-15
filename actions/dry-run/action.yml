@@ -1,0 +1,44 @@
+name: Provision Dry-Run
+description: Validate migrations and seeds against sandbox. Always restores sandbox to pre-run state.
+
+inputs:
+  target:
+    description: Sandbox database name
+    required: true
+  provision_dir:
+    description: Directory containing provision files (migrations, seeds)
+    required: false
+    default: provision
+  proxy_url:
+    description: Oboist base URL
+    required: true
+  proxy_token:
+    description: Oboist bearer token
+    required: true
+
+outputs:
+  passed:
+    description: Whether the dry-run passed
+    value: ${{ steps.dry-run.outputs.passed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Dry-run
+      id: dry-run
+      shell: bash
+      env:
+        PROXY_TOKEN: ${{ inputs.proxy_token }}
+        PROXY_URL: ${{ inputs.proxy_url }}
+      run: |
+        set +e
+        bash "${{ github.action_path }}/../provision/dry-run.sh" \
+          --target "${{ inputs.target }}" \
+          --provision-dir "${{ inputs.provision_dir }}"
+        EXIT=$?
+        if [[ $EXIT -eq 0 ]]; then
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "passed=false" >> "$GITHUB_OUTPUT"
+        fi
+        exit 0

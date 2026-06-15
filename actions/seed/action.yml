@@ -1,0 +1,60 @@
+name: Seed
+description: Apply the newest migration-compatible seed through Oboist.
+
+inputs:
+  target:
+    description: Target to seed
+    required: true
+  migration_version:
+    description: Migration version to seed against; queries schema_operations when omitted
+    required: false
+    default: ""
+  provision_dir:
+    description: Directory containing provision files
+    required: false
+    default: provision
+  proxy_url:
+    description: Oboist base URL
+    required: true
+  proxy_token:
+    description: Oboist bearer token
+    required: true
+
+outputs:
+  applied:
+    description: Whether a seed was applied
+    value: ${{ steps.seed.outputs.applied }}
+  seed_file:
+    description: Selected seed file
+    value: ${{ steps.seed.outputs.seed_file }}
+  seed_version:
+    description: Selected seed version
+    value: ${{ steps.seed.outputs.seed_version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Apply seed
+      id: seed
+      shell: bash
+      env:
+        PROXY_TOKEN: ${{ inputs.proxy_token }}
+        PROXY_URL: ${{ inputs.proxy_url }}
+      run: |
+        CONFIG="${{ inputs.provision_dir }}/config.yml"
+        MIGRATION_VERSION=""
+
+        if [[ -f "$CONFIG" ]]; then
+          MIGRATION_VERSION=$(yq -r '.operation_versions.migration // empty' "$CONFIG")
+        fi
+
+        arguments=(
+          --target "${{ inputs.target }}"
+          --seeds "${{ inputs.provision_dir }}/seeds"
+        )
+
+        if [[ -n "$MIGRATION_VERSION" ]]; then
+          arguments+=(--migration-version "$MIGRATION_VERSION")
+        fi
+
+        bash "${{ github.action_path }}/../../commands/apply-seed.sh" "${arguments[@]}"

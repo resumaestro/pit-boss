@@ -1,0 +1,65 @@
+name: Apply
+description: Apply the versioned config file to a target through Oboist.
+
+inputs:
+  target:
+    description: Target passed through to the proxy
+    required: true
+  provision_dir:
+    description: Directory containing provision files
+    required: false
+    default: provision
+  proxy_url:
+    description: Oboist base URL
+    required: true
+  proxy_token:
+    description: Oboist bearer token
+    required: true
+
+outputs:
+  applied:
+    description: Whether a config was applied
+    value: ${{ steps.apply.outputs.applied }}
+  apply_file:
+    description: Selected apply file
+    value: ${{ steps.apply.outputs.apply_file }}
+  apply_version:
+    description: Selected apply version
+    value: ${{ steps.apply.outputs.apply_version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Apply config
+      id: apply
+      shell: bash
+      env:
+        PROXY_TOKEN: ${{ inputs.proxy_token }}
+        PROXY_URL: ${{ inputs.proxy_url }}
+      run: |
+        CONFIG="${{ inputs.provision_dir }}/config.yml"
+        VERSION=""
+
+        if [[ -f "$CONFIG" ]]; then
+          VERSION=$(yq -r '.operation_versions.apply // empty' "$CONFIG")
+        fi
+
+        if [[ -z "$VERSION" ]]; then
+          echo "::warning::$CONFIG is missing operation_versions.apply; skipping apply."
+          echo "applied=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if ! [[ "$VERSION" =~ ^[0-9]+$ ]]; then
+          echo "::warning::operation_versions.apply is not a valid integer: $VERSION"
+          echo "applied=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        SHA=$(git rev-parse HEAD 2>/dev/null || echo "")
+
+        bash "${{ github.action_path }}/../../commands/apply-config.sh" \
+          --applies "${{ inputs.provision_dir }}/applies" \
+          --target "${{ inputs.target }}" \
+          --version "$VERSION" \
+          --sha "$SHA"

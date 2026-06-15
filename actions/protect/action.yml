@@ -1,0 +1,69 @@
+name: Protect Provision Files
+description: Fail if any already-applied seed or migration file has been edited on a protected branch.
+
+inputs:
+  target:
+    description: Target to query applied versions from
+    required: true
+  provision_dir:
+    description: Directory containing provision files
+    required: false
+    default: provision
+  base_ref:
+    description: Base branch to diff against
+    required: false
+    default: main
+  proxy_url:
+    description: Oboist base URL
+    required: true
+  proxy_token:
+    description: Oboist bearer token
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check for edits to applied provision files
+      shell: bash
+      env:
+        PROXY_TOKEN: ${{ inputs.proxy_token }}
+        PROXY_URL: ${{ inputs.proxy_url }}
+      run: |
+        source "${{ github.action_path }}/../../utils/database.sh"
+
+        migration_result=$(query_database \
+          "${{ inputs.target }}" \
+          "SELECT COALESCE(version, 0) AS version FROM schema_operations WHERE kind = 'migration';")
+        APPLIED_MIGRATION=$(jq -er '.results[0].version // 0' <<< "$migration_result")
+
+        seed_result=$(query_database \
+          "${{ inputs.target }}" \
+          "SELECT COALESCE(version, 0) AS version FROM schema_operations WHERE kind = 'seed';")
+        APPLIED_SEED=$(jq -er '.results[0].version // 0' <<< "$seed_result")
+
+        CHANGED=$(git diff --name-only origin/${{ inputs.base_ref }}...HEAD)
+
+        BLOCKED=false
+
+        while IFS= read -r file; do
+          case "$file" in
+            ${{ inputs.provision_dir }}/migrations/*)
+              ver=$(basename "$file" | grep -Eo '^[0-9]+' || true)
+              if [[ -n "$ver" && "$ver" -le "$APPLIED_MIGRATION" ]]; then
+                echo "::error file=$file::Applied migration $ver must not be edited (applied up to $APPLIED_MIGRATION)"
+                BLOCKED=true
+              fi
+              ;;
+            ${{ inputs.provision_dir }}/seeds/*)
+              ver=$(basename "$file" | grep -Eo '^[0-9]+' || true)
+              if [[ -n "$ver" && "$ver" -le "$APPLIED_SEED" ]]; then
+                echo "::error file=$file::Applied seed $ver must not be edited (applied up to $APPLIED_SEED)"
+                BLOCKED=true
+              fi
+              ;;
+          esac
+        done <<< "$CHANGED"
+
+        if [[ "$BLOCKED" == "true" ]]; then
+          exit 1
+        fi
