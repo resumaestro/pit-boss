@@ -1,0 +1,143 @@
+name: Migrate
+description: Reconcile a target through the proxy, with staging roundtrip testing.
+
+inputs:
+  production_target:
+    description: Production target name
+    required: true
+  staging_target:
+    description: Staging target name; defaults to <production_target>-staging
+    required: false
+    default: ""
+  provision_dir:
+    description: Directory containing operations files
+    required: false
+    default: provision
+  snaps_dir:
+    description: Directory for migration snapshots
+    required: false
+    default: .migration-snaps
+  proxy_url:
+    description: Proxy base URL
+    required: true
+  proxy_token:
+    description: Proxy bearer token
+    required: true
+
+outputs:
+  actual:
+    description: Migration version currently applied to production
+    value: ${{ steps.versions.outputs.actual }}
+  target:
+    description: Target migration version from config.yml
+    value: ${{ steps.versions.outputs.target }}
+  needed:
+    description: Whether a migration was needed
+    value: ${{ steps.versions.outputs.needed }}
+  passed:
+    description: Whether the staging roundtrip test passed
+    value: ${{ steps.run.outputs.passed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read versions
+      id: versions
+      shell: bash
+      env:
+        PROXY_TOKEN: ${{ inputs.proxy_token }}
+        PROXY_URL: ${{ inputs.proxy_url }}
+      run: |
+        CONFIG="${{ inputs.provision_dir }}/config.yml"
+
+        if [[ ! -f "$CONFIG" ]]; then
+          echo "::warning::$CONFIG not found; skipping migration."
+          echo "needed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        TARGET=$(yq -r '.operation_versions.migration // empty' "$CONFIG")
+
+        if [[ -z "$TARGET" ]]; then
+          echo "::warning::$CONFIG is missing operation_versions.migration; skipping migration."
+          echo "needed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if ! [[ "$TARGET" =~ ^[0-9]+$ ]]; then
+          echo "::warning::$CONFIG operation_versions.migration is not a valid integer: $TARGET"
+          echo "needed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        STAGING="${{ inputs.staging_target }}"
+        if [[ -z "$STAGING" ]]; then
+          STAGING="${{ inputs.production_target }}-staging"
+        fi
+        echo "staging_target=$STAGING" >> "$GITHUB_OUTPUT"
+
+        source "${{ github.action_path }}/../../utils/database.sh"
+        execute_database_sql \
+          "${{ inputs.production_target }}" \
+          "CREATE TABLE IF NOT EXISTS schema_operations (kind TEXT PRIMARY KEY, version INTEGER NOT NULL, applied_at TEXT NOT NULL DEFAULT (datetime('now')));" \
+          > /dev/null
+        RESULT=$(query_database \
+          "${{ inputs.production_target }}" \
+          "SELECT COALESCE(version, 0) AS version FROM schema_operations WHERE kind = 'migration';")
+        ACTUAL=$(jq -er '.results[0].version // 0' <<< "$RESULT")
+
+        echo "actual=$ACTUAL" >> "$GITHUB_OUTPUT"
+        echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+
+        if [[ "$TARGET" -eq "$ACTUAL" ]]; then
+          echo "needed=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "needed=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Restore snapshot cache
+      id: snap-cache
+      if: steps.versions.outputs.needed == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ${{ inputs.snaps_dir }}
+        key: snap-${{ inputs.production_target }}-${{ steps.versions.outputs.actual }}
+
+    - name: Run migration
+      id: run
+      if: steps.versions.outputs.needed == 'true'
+      shell: bash
+      env:
+        PROXY_TOKEN: ${{ inputs.proxy_token }}
+        PROXY_URL: ${{ inputs.proxy_url }}
+      run: |
+        set +e
+        bash "${{ github.action_path }}/migrate.sh" \
+          --production-target "${{ inputs.production_target }}" \
+          --staging-target "${{ steps.versions.outputs.staging_target }}" \
+          --config "${{ inputs.provision_dir }}/config.yml" \
+          --migrations "${{ inputs.provision_dir }}/migrations" \
+          --snaps "${{ inputs.snaps_dir }}"
+        EXIT_CODE=$?
+
+        if [[ $EXIT_CODE -eq 0 ]]; then
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "passed=false" >> "$GITHUB_OUTPUT"
+        fi
+
+        exit 0
+
+    - name: Cache snapshot of actual
+      if: steps.versions.outputs.needed == 'true' && steps.run.outputs.passed == 'false' && steps.snap-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ inputs.snaps_dir }}
+        key: snap-${{ inputs.production_target }}-${{ steps.versions.outputs.actual }}
+
+    - name: Cache snapshot of target
+      if: steps.versions.outputs.needed == 'true' && steps.run.outputs.passed == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ inputs.snaps_dir }}
+        key: snap-${{ inputs.production_target }}-${{ steps.versions.outputs.target }}

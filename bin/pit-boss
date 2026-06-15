@@ -8,7 +8,20 @@ shift 2>/dev/null || true
 
 case "$COMMAND" in
   seed)
-    sh "$SCRIPT_DIR/commands/seed.sh" "$@"
+    if [ "${1:-}" = "apply" ]; then
+      shift
+      bash "$SCRIPT_DIR/commands/apply-seed.sh" "$@"
+    else
+      sh "$SCRIPT_DIR/commands/seed.sh" "$@"
+    fi
+    ;;
+  apply)
+    if [ "${1:-}" = "run" ]; then
+      shift
+      bash "$SCRIPT_DIR/commands/apply-config.sh" "$@"
+    else
+      sh "$SCRIPT_DIR/commands/apply.sh" "$@"
+    fi
     ;;
   migration)
     sh "$SCRIPT_DIR/commands/migration.sh" "$@"
@@ -24,6 +37,9 @@ case "$COMMAND" in
     printf '  seed <file>               Annotate seed with MIN=highest, MAX=open\n'
     printf '  seed <file> locked        Annotate seed with MIN=MAX=highest\n'
     printf '  seed <file> --min=N       Annotate seed with MIN=N, NEEDS_VERIFICATION=true\n'
+    printf '  seed apply [options]      Apply the newest compatible seed\n'
+    printf '  apply <name>              Scaffold a new apply JSON file\n'
+    printf '  apply run [options]       Apply a versioned config through Oboist\n'
     printf '  pre-commit                Resolve open MIGRATION_MAX values (run as hook)\n'
     ;;
   *)

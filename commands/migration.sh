@@ -7,7 +7,7 @@
 # Usage:
 #   pit-boss migration <name>
 
-MIGRATIONS_DIR="${MIGRATIONS_DIR:-migrations}"
+MIGRATIONS_DIR="${MIGRATIONS_DIR:-provision/migrations}"
 
 NAME="$1"
 

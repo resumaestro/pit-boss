@@ -13,7 +13,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 . "$SCRIPT_DIR/../utils/annotations.sh"
 . "$SCRIPT_DIR/../utils/migrations.sh"
 
-MIGRATIONS_DIR="${MIGRATIONS_DIR:-migrations}"
+MIGRATIONS_DIR="${MIGRATIONS_DIR:-provision/migrations}"
 MODE="open"
 CUSTOM_MIN=""
 SEED_FILE=""

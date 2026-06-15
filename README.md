@@ -1,19 +1,19 @@
 # pit-boss
 
-Shared GitHub Actions for the Resumaestro monorepo ecosystem.
+Shared database tooling and GitHub Actions for the Resumaestro ecosystem.
 
 ## Actions
 
 ### `actions/d1-migrate`
 
-Reconciles a Cloudflare D1 database to a target migration version, with sandbox roundtrip testing before anything touches production.
+Reconciles a D1 database to a target migration version, with sandbox roundtrip testing before anything touches production. Database access can use Oboist or direct Wrangler credentials.
 
 #### How it works
 
 1. Reads the target version from `config.json` (`applied_migration_version`)
 2. Reads the applied version from the real DB (`schema_migrations` table)
 3. If they match — no-op
-4. Creates the sandbox DB if it doesn't exist
+4. Verifies the sandbox binding through Oboist, or creates the sandbox database when using Wrangler
 5. For **up**: roundtrip-tests each new migration (up → down → schema diff) on the sandbox. Any mismatch aborts — nothing touches the real DB
 6. For **down**: dry-runs the rollback on the sandbox first
 7. On pass → applies to real DB, caches a snapshot of the final state
@@ -26,12 +26,16 @@ Snapshots are cached in GitHub Actions cache under `d1-snap-<db_name>-<version>`
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `db_name` | yes | — | Production D1 database name |
-| `sandbox_db_name` | yes | — | Sandbox D1 database name (auto-created if missing) |
+| `sandbox_db_name` | no | `<db_name>-sandbox` | Sandbox database name |
 | `config_file` | no | `config.json` | Path to config file containing `applied_migration_version` |
 | `migrations_dir` | no | `migrations` | Path to directory containing migration files |
 | `snaps_dir` | no | `.migration-snaps` | Path to snapshot cache directory |
-| `cloudflare_api_token` | yes | — | CF API token with **D1 Edit** scope |
-| `cloudflare_account_id` | yes | — | Cloudflare account ID |
+| `proxy_url` | conditional | — | Oboist base URL |
+| `proxy_token` | conditional | — | Oboist bearer token |
+| `cloudflare_token` | conditional | — | Cloudflare API token for direct Wrangler access |
+| `cloudflare_account_id` | conditional | — | Cloudflare account ID for direct Wrangler access |
+
+Provide either the two proxy inputs or the two Cloudflare inputs, never both.
 
 #### Outputs
 
@@ -41,6 +45,60 @@ Snapshots are cached in GitHub Actions cache under `d1-snap-<db_name>-<version>`
 | `target` | Target migration version from `config.json` |
 | `needed` | `true` if a migration was needed |
 | `passed` | `true` if the dry-run roundtrip test passed |
+
+---
+
+### `actions/d1-seed`
+
+Selects the highest numbered verified seed whose migration range includes the target database version, then executes its SQL through Oboist or Wrangler.
+
+Seed files live in `provision/seeds` by default:
+
+```sql
+-- pit-boss: MIGRATION_MIN=2
+-- pit-boss: MIGRATION_MAX=4
+
+INSERT INTO companies (id, name) VALUES ('example', 'Example');
+```
+
+The filename must start with a numeric seed version:
+
+```text
+provision/seeds/
+  0001_example.up.sql
+  0002_pipeline.up.sql
+```
+
+Create annotations with the CLI:
+
+```bash
+pit-boss seed provision/seeds/0002_pipeline.up.sql
+pit-boss pre-commit
+```
+
+Apply a compatible seed through Oboist:
+
+```bash
+PROXY_URL="$OBOIST_URL" \
+PROXY_TOKEN="$OBOIST_SECRET" \
+pit-boss seed apply \
+  --target sandbox \
+  --database resumaestro-pipeline-sandbox
+```
+
+The action form is:
+
+```yaml
+- name: Seed sandbox
+  uses: resumaestro/pit-boss/actions/d1-seed@main
+  with:
+    target: sandbox
+    database: resumaestro-pipeline-sandbox
+    proxy_url: ${{ vars.OBOIST_URL }}
+    proxy_token: ${{ secrets.OBOIST_SECRET }}
+```
+
+`migration_version` is optional. When omitted, Pit Boss reads the current version from `schema_migrations`. Seeds with an unresolved `MIGRATION_MAX` or `NEEDS_VERIFICATION=true` are rejected.
 
 ---
 
@@ -72,8 +130,8 @@ Bump this number to trigger a migration. Decrease it to trigger a rollback.
 
 | Setting | Value |
 |---------|-------|
-| Secret: `CLOUDFLARE_API_TOKEN` | CF API token with D1 Edit scope |
-| Var: `CLOUDFLARE_ACCOUNT_ID` | `281f6b8969eb59a0dec34daaafd69a29` |
+| Secret: `OBOIST_SECRET` | Bearer token shared with Oboist |
+| Var: `OBOIST_URL` | Deployed Oboist worker URL |
 | Environment: `sandbox-lock` | No protection rules — concurrency is enforced by GitHub's single-deployment-at-a-time behavior |
 | Branch rule: `main` | Enable merge queue |
 
@@ -118,8 +176,8 @@ jobs:
         with:
           db_name: <your-db-name>
           sandbox_db_name: <your-db-name>-sandbox
-          cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          proxy_url: ${{ vars.OBOIST_URL }}
+          proxy_token: ${{ secrets.OBOIST_SECRET }}
 
   migrate:
     needs: dry-run
@@ -133,8 +191,8 @@ jobs:
         with:
           db_name: <your-db-name>
           sandbox_db_name: <your-db-name>-sandbox
-          cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          proxy_url: ${{ vars.OBOIST_URL }}
+          proxy_token: ${{ secrets.OBOIST_SECRET }}
 
   revert:
     needs: dry-run
@@ -193,8 +251,8 @@ jobs:
         with:
           db_name: <your-db-name>
           sandbox_db_name: <your-db-name>-sandbox
-          cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          proxy_url: ${{ vars.OBOIST_URL }}
+          proxy_token: ${{ secrets.OBOIST_SECRET }}
 
       - name: Comment result on PR
         if: always() && steps.migrate.outputs.needed == 'true'

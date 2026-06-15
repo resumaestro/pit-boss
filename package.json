@@ -1,0 +1,23 @@
+{
+  "name": "@resumaestro/pit-boss",
+  "version": "0.1.0",
+  "description": "Shared CI tooling for the Resumaestro monorepo",
+  "bin": {
+    "pit-boss": "./bin/pit-boss"
+  },
+  "files": [
+    "bin/",
+    "commands/",
+    "config/",
+    "pre-commit/",
+    "utils/"
+  ],
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/resumaestro/pit-boss.git"
+  },
+  "license": "UNLICENSED"
+}
