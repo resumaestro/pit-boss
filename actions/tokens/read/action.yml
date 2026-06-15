@@ -1,4 +1,4 @@
-name: Read Tokens
+name: tokens-read
 description: Parse tokens.yml and output cloudflare secret and variable name lists as JSON arrays.
 
 inputs:

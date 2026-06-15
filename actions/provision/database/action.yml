@@ -1,0 +1,159 @@
+name: provision-database
+description: Apply migrations and seeds to a single target in the correct interleaved order.
+
+inputs:
+  target:
+    description: Database target name
+    required: true
+  provision_dir:
+    description: Directory containing provision files (migrations, seeds)
+    required: false
+    default: provision
+  proxy_url:
+    description: Oboist base URL
+    required: true
+  proxy_token:
+    description: Oboist bearer token
+    required: true
+
+outputs:
+  passed:
+    description: Whether provisioning succeeded
+    value: ${{ steps.apply.outputs.passed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read config
+      id: read-config
+      shell: bash
+      run: |
+        CONFIG_FILE="${{ inputs.provision_dir }}/config.yml"
+
+        if [[ ! -f "$CONFIG_FILE" ]]; then
+          echo "No config.yml found at $CONFIG_FILE; skipping provision."
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        TARGET_MIGRATION=$(yq -r '.operation_versions.migration // 0' "$CONFIG_FILE")
+
+        if [[ -z "$TARGET_MIGRATION" || "$TARGET_MIGRATION" == "0" ]]; then
+          echo "No operation_versions.migration in $CONFIG_FILE; skipping provision."
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "skip=false" >> "$GITHUB_OUTPUT"
+        echo "target_migration=$TARGET_MIGRATION" >> "$GITHUB_OUTPUT"
+
+    - name: Read versions
+      id: read-versions
+      if: steps.read-config.outputs.skip != 'true'
+      shell: bash
+      env:
+        PROXY_TOKEN: ${{ inputs.proxy_token }}
+        PROXY_URL: ${{ inputs.proxy_url }}
+      run: |
+        . "${{ github.action_path }}/../../../utils/database.sh"
+
+        CURRENT_MIGRATION=$(query_database "${{ inputs.target }}" \
+          "SELECT COALESCE(version, 0) AS version FROM schema_operations WHERE kind = 'migration';" \
+          | jq -er '.results[0].version // 0' 2>/dev/null || echo 0)
+
+        CURRENT_SEED=$(query_database "${{ inputs.target }}" \
+          "SELECT COALESCE(version, 0) AS version FROM schema_operations WHERE kind = 'seed';" \
+          | jq -er '.results[0].version // 0' 2>/dev/null || echo 0)
+
+        if [[ "${{ steps.read-config.outputs.target_migration }}" -eq "$CURRENT_MIGRATION" ]]; then
+          echo "Already at migration ${{ steps.read-config.outputs.target_migration }}. Nothing to do."
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "${{ inputs.target }} migration=$CURRENT_MIGRATION seed=$CURRENT_SEED target=${{ steps.read-config.outputs.target_migration }}"
+        echo "skip=false" >> "$GITHUB_OUTPUT"
+        echo "current_migration=$CURRENT_MIGRATION" >> "$GITHUB_OUTPUT"
+        echo "current_seed=$CURRENT_SEED" >> "$GITHUB_OUTPUT"
+
+    - name: Plan
+      id: plan
+      if: steps.read-versions.outputs.skip != 'true'
+      shell: bash
+      run: |
+        ACTION_PATH_DIR="${{ github.action_path }}/.."
+        MIGRATIONS_DIR="${{ inputs.provision_dir }}/migrations"
+        SEEDS_DIR="${{ inputs.provision_dir }}/seeds"
+        CURRENT_MIGRATION="${{ steps.read-versions.outputs.current_migration }}"
+        CURRENT_SEED="${{ steps.read-versions.outputs.current_seed }}"
+        TARGET_MIGRATION="${{ steps.read-config.outputs.target_migration }}"
+
+        . "$ACTION_PATH_DIR/database/utils.sh"
+
+        resolve_pending_seeds
+
+        if [[ ! -d "$MIGRATIONS_DIR" ]]; then
+          echo "WARNING: migrations dir '$MIGRATIONS_DIR' not found; no migrations will be applied."
+        fi
+
+        echo ""
+        echo "Plan:"
+        echo "  Migration: $CURRENT_MIGRATION → $TARGET_MIGRATION"
+        for i in "${!PENDING_SEED_FILES[@]}"; do
+          echo "  Seed $(basename "${PENDING_SEED_FILES[$i]}") → at migration ${PENDING_SEED_AT[$i]}"
+        done
+
+        # Serialize arrays for next step
+        printf '%s\n' "${PENDING_SEED_FILES[@]+"${PENDING_SEED_FILES[@]}"}" > /tmp/pending_seed_files
+        printf '%s\n' "${PENDING_SEED_AT[@]+"${PENDING_SEED_AT[@]}"}" > /tmp/pending_seed_at
+
+    - name: Execute
+      id: apply
+      if: steps.read-versions.outputs.skip != 'true'
+      shell: bash
+      env:
+        PROXY_TOKEN: ${{ inputs.proxy_token }}
+        PROXY_URL: ${{ inputs.proxy_url }}
+      run: |
+        set +e
+
+        ACTION_PATH_DIR="${{ github.action_path }}/.."
+        MIGRATIONS_DIR="${{ inputs.provision_dir }}/migrations"
+        SEEDS_DIR="${{ inputs.provision_dir }}/seeds"
+        CURRENT_MIGRATION="${{ steps.read-versions.outputs.current_migration }}"
+        TARGET_MIGRATION="${{ steps.read-config.outputs.target_migration }}"
+
+        . "${{ github.action_path }}/../../../utils/database.sh"
+        . "$ACTION_PATH_DIR/database/utils.sh"
+
+        mapfile -t PENDING_SEED_FILES < /tmp/pending_seed_files
+        mapfile -t PENDING_SEED_AT < /tmp/pending_seed_at
+
+        echo ""
+        echo "==> Applying to ${{ inputs.target }}..."
+
+        CURRENT_V="$CURRENT_MIGRATION"
+
+        for seed_file in $(seeds_pending_at "$CURRENT_V"); do
+          apply_seed "${{ inputs.target }}" "$seed_file"
+        done
+
+        for (( v = CURRENT_MIGRATION + 1; v <= TARGET_MIGRATION; v++ )); do
+          apply_migration_up "${{ inputs.target }}" "$v"
+          CURRENT_V="$v"
+
+          for seed_file in $(seeds_pending_at "$CURRENT_V"); do
+            apply_seed "${{ inputs.target }}" "$seed_file"
+          done
+        done
+
+        echo ""
+        echo "Done. ${{ inputs.target }} at migration=$TARGET_MIGRATION"
+
+        EXIT=$?
+        if [[ $EXIT -eq 0 ]]; then
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "passed=false" >> "$GITHUB_OUTPUT"
+        fi
+        exit $EXIT

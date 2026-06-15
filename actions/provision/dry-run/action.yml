@@ -1,0 +1,66 @@
+name: provision-dry-run
+description: Snapshot target, run provision/database, then always restore to pre-run state.
+
+inputs:
+  target:
+    description: Database target name
+    required: true
+  fail_fast:
+    description: Set to 'true' fails fast rather than continuing on error
+    required: false
+    default: "false"
+  provision_dir:
+    description: Directory containing provision files (migrations, seeds)
+    required: false
+    default: provision
+  proxy_url:
+    description: Oboist base URL
+    required: true
+  proxy_token:
+    description: Oboist bearer token
+    required: true
+
+outputs:
+  passed:
+    description: Whether the dry-run passed
+    value: ${{ steps.restore.outputs.passed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Snapshot
+      id: snapshot
+      shell: bash
+      env:
+        PROXY_TOKEN: ${{ inputs.proxy_token }}
+        PROXY_URL: ${{ inputs.proxy_url }}
+      run: |
+        . "${{ github.action_path }}/../../../utils/database.sh"
+        SNAP_FILE=$(mktemp)
+        echo "==> Snapshotting ${{ inputs.target }}..."
+        create_database_snapshot "${{ inputs.target }}" "$SNAP_FILE"
+        echo "snap_file=$SNAP_FILE" >> "$GITHUB_OUTPUT"
+
+    - name: Provision
+      id: provision
+      uses: resumaestro/pit-boss/actions/provision/database@main
+      with:
+        target: ${{ inputs.target }}
+        fail_fast: ${{ inputs.fail_fast }}
+        provision_dir: ${{ inputs.provision_dir }}
+        proxy_url: ${{ inputs.proxy_url }}
+        proxy_token: ${{ inputs.proxy_token }}
+
+    - name: Restore
+      id: restore
+      if: always()
+      shell: bash
+      env:
+        PROXY_TOKEN: ${{ inputs.proxy_token }}
+        PROXY_URL: ${{ inputs.proxy_url }}
+      run: |
+        . "${{ github.action_path }}/../../../utils/database.sh"
+        echo "==> Restoring ${{ inputs.target }} to pre-run state..."
+        restore_database_snapshot "${{ inputs.target }}" "${{ steps.snapshot.outputs.snap_file }}"
+        rm -f "${{ steps.snapshot.outputs.snap_file }}"
+        echo "passed=${{ steps.provision.outputs.passed }}" >> "$GITHUB_OUTPUT"

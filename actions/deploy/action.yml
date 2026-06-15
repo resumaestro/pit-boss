@@ -21,29 +21,35 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Deploy
-      id: deploy
+    - name: Fetch variables
+      id: fetch-vars
+      if: ${{ inputs.variable_keys != '' && inputs.variable_keys != '[]' }}
       shell: bash
       env:
         PROXY_URL: ${{ inputs.proxy_url }}
         PROXY_TOKEN: ${{ inputs.proxy_token }}
       run: |
+        ARGS=()
+        while IFS= read -r name; do
+          value=$(curl --silent --show-error --fail-with-body \
+            "${PROXY_URL%/}/pit-boss/token?kind=variable&name=${name}" \
+            --header "Authorization: Bearer ${PROXY_TOKEN}" \
+            | jq -er '.value')
+          ARGS+=(--value "${name}:${value}")
+        done < <(printf '%s' '${{ inputs.variable_keys }}' | jq -r '.[]')
+        echo "args=${ARGS[*]}" >> "$GITHUB_OUTPUT"
+
+    - name: Deploy
+      id: deploy
+      shell: bash
+      run: |
         set +e
         ARGS=()
-
-        if [[ -n '${{ inputs.variable_keys }}' && '${{ inputs.variable_keys }}' != '[]' ]]; then
-          while IFS= read -r name; do
-            value=$(curl --silent --show-error --fail-with-body \
-              "${PROXY_URL%/}/pit-boss/token?kind=variable&name=${name}" \
-              --header "Authorization: Bearer ${PROXY_TOKEN}" \
-              | jq -er '.value')
-            ARGS+=(--value "${name}:${value}")
-          done < <(printf '%s' '${{ inputs.variable_keys }}' | jq -r '.[]')
+        if [[ -n '${{ steps.fetch-vars.outputs.args }}' ]]; then
+          read -ra ARGS <<< '${{ steps.fetch-vars.outputs.args }}'
         fi
-
         sh "${{ github.action_path }}/../../bin/pit-boss" vars "${ARGS[@]}"
         EXIT=$?
-
         if [[ $EXIT -eq 0 ]]; then
           echo "deployed=true" >> "$GITHUB_OUTPUT"
         else

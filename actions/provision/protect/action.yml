@@ -1,4 +1,4 @@
-name: Protect Provision Files
+name: provision-protect
 description: Fail if any already-applied seed or migration file has been edited on a protected branch.
 
 inputs:
@@ -29,7 +29,7 @@ runs:
         PROXY_TOKEN: ${{ inputs.proxy_token }}
         PROXY_URL: ${{ inputs.proxy_url }}
       run: |
-        source "${{ github.action_path }}/../../utils/database.sh"
+        source "${{ github.action_path }}/../../../utils/database.sh"
 
         migration_result=$(query_database \
           "${{ inputs.target }}" \
