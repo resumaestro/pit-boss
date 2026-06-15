@@ -58,8 +58,26 @@ request_proxy_operation() {
 execute_database_file() {
   local target="$1"
   local sql_file="$2"
+  local stmt_file
+  stmt_file=$(mktemp)
 
-  request_proxy_operation "$target" "exec" "$sql_file"
+  while IFS= read -r -d $'\0' stmt; do
+    printf '%s' "$stmt" > "$stmt_file"
+    if ! request_proxy_operation "$target" "exec" "$stmt_file" > /dev/null; then
+      rm -f "$stmt_file"
+      return 1
+    fi
+  done < <(python3 - "$sql_file" <<'PYEOF'
+import sys, re
+sql = open(sys.argv[1]).read()
+lines = [re.sub(r'--.*$', '', line) for line in sql.splitlines()]
+stmts = [s.strip() for s in ' '.join(lines).split(';') if s.strip()]
+for stmt in stmts:
+    sys.stdout.buffer.write(stmt.encode() + b'\x00')
+PYEOF
+  )
+
+  rm -f "$stmt_file"
 }
 
 execute_database_sql() {
