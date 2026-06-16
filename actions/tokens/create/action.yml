@@ -28,7 +28,7 @@ runs:
           echo "::error::tokens.yml not found"
           exit 1
         fi
-        SCOPES=$(yq -o json '.cloudflare.scope' tokens.yml)
+        SCOPES=$(yq -o json -I 0 '.cloudflare.scope' tokens.yml)
         echo "scopes=$SCOPES" >> "$GITHUB_OUTPUT"
 
     - name: Create deploy token
