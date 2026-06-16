@@ -1,0 +1,89 @@
+#!/bin/sh
+# pit-boss vars: append variables to wrangler.toml, deploy, then restore
+
+set -e
+
+CONFIG=""
+INLINE_VALUES=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --config|-c)
+      CONFIG="$2"
+      shift 2
+      ;;
+    --value|-v)
+      if [ -n "$INLINE_VALUES" ]; then
+        INLINE_VALUES="${INLINE_VALUES}
+${2}"
+      else
+        INLINE_VALUES="$2"
+      fi
+      shift 2
+      ;;
+    *)
+      printf 'Unknown option: %s\n' "$1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Resolve wrangler config
+if [ -z "$CONFIG" ]; then
+  if [ -f "wrangler.toml" ]; then
+    CONFIG="wrangler.toml"
+  elif [ -f "wrangler.jsonc" ]; then
+    printf 'Error: %s is a JSONC config. vars requires a wrangler.toml.\n' "wrangler.jsonc" >&2
+    exit 1
+  else
+    printf 'Error: no wrangler.toml found. Use --config to specify a path.\n' >&2
+    exit 1
+  fi
+fi
+
+# Build [vars] block from --value pairs
+VARS_BLOCK=""
+if [ -n "$INLINE_VALUES" ]; then
+  _IFS_SAVE="$IFS"
+  IFS='
+'
+  for _pair in $INLINE_VALUES; do
+    IFS="$_IFS_SAVE"
+    _pair="$(printf '%s' "$_pair" | sed 's/^ *//;s/ *$//')"
+    [ -z "$_pair" ] && continue
+    if printf '%s' "$_pair" | grep -q '='; then
+      _k="${_pair%%=*}"
+      _v="${_pair#*=}"
+    elif printf '%s' "$_pair" | grep -q ':'; then
+      _k="${_pair%%:*}"
+      _v="${_pair#*:}"
+    else
+      printf 'Error: invalid --value format "%s" (expected KEY=value or KEY:value)\n' "$_pair" >&2
+      exit 1
+    fi
+    VARS_BLOCK="${VARS_BLOCK}${_k} = \"${_v}\"
+"
+  done
+  IFS="$_IFS_SAVE"
+fi
+
+# Append [vars] block and set up restore trap
+LINE_COUNT=0
+if [ -n "$VARS_BLOCK" ]; then
+  VARS_SECTION="
+[vars]
+${VARS_BLOCK}"
+  LINE_COUNT="$(printf '%s' "$VARS_SECTION" | wc -l)"
+
+  _restore() {
+    TOTAL="$(wc -l < "$CONFIG")"
+    KEEP="$(( TOTAL - LINE_COUNT ))"
+    TMPFILE="$(mktemp)"
+    head -n "$KEEP" "$CONFIG" > "$TMPFILE" && mv "$TMPFILE" "$CONFIG"
+  }
+  trap '_restore' EXIT INT TERM
+
+  printf '%s' "$VARS_SECTION" >> "$CONFIG"
+fi
+
+npx wrangler deploy --config "$CONFIG"

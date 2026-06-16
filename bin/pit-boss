@@ -32,6 +32,9 @@ case "$COMMAND" in
   secrets|s)
     sh "$SCRIPT_DIR/bin/tokens" "$COMMAND" "$@"
     ;;
+  vars|v)
+    sh "$SCRIPT_DIR/bin/vars" "$@"
+    ;;
   ""|--help|-h)
     printf 'Usage: pit-boss <command> [options]\n'
     printf '\n'
@@ -45,6 +48,9 @@ case "$COMMAND" in
     printf '  apply run [options]       Apply a versioned config through Oboist\n'
     printf '  pre-commit                Resolve open MIGRATION_MAX values (run as hook)\n'
     printf '  secrets, s [options]      Push secrets from .env to Cloudflare via oboist\n'
+  printf '  vars, v [options]         Append variables to wrangler.toml, deploy, then restore\n'
+  printf '    --value/-v KEY:val        Variable to inject (may be repeated)\n'
+  printf '    --config/-c <path>        Path to wrangler.toml\n'
     ;;
   *)
     printf 'Unknown command: %s\n' "$COMMAND" >&2
