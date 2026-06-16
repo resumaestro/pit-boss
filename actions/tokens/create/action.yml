@@ -1,0 +1,54 @@
+name: tokens-create
+description: Create a scoped Cloudflare deploy token via Oboist.
+
+inputs:
+  proxy_url:
+    description: Oboist base URL
+    required: true
+  proxy_token:
+    description: Oboist bearer token
+    required: true
+
+outputs:
+  key:
+    description: Token ID (used to remove the token later)
+    value: ${{ steps.create.outputs.key }}
+  token:
+    description: The Cloudflare API token value
+    value: ${{ steps.create.outputs.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read scopes from tokens.yml
+      id: read-scopes
+      shell: bash
+      run: |
+        if [[ ! -f "tokens.yml" ]]; then
+          echo "::error::tokens.yml not found"
+          exit 1
+        fi
+        SCOPES=$(yq -o json '.cloudflare.scope' tokens.yml)
+        echo "scopes=$SCOPES" >> "$GITHUB_OUTPUT"
+
+    - name: Create deploy token
+      id: create
+      shell: bash
+      env:
+        PROXY_TOKEN: ${{ inputs.proxy_token }}
+        PROXY_URL: ${{ inputs.proxy_url }}
+      run: |
+        RESPONSE=$(jq -n --argjson scopes '${{ steps.read-scopes.outputs.scopes }}' \
+          '{ scopes: $scopes }' \
+          | curl \
+            --silent \
+            --show-error \
+            --fail-with-body \
+            --request POST \
+            "${PROXY_URL%/}/pit-boss/deploy-token/create" \
+            --header "Authorization: Bearer ${PROXY_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data-binary @-)
+
+        echo "key=$(printf '%s' "$RESPONSE" | jq -r '.key')" >> "$GITHUB_OUTPUT"
+        echo "token=$(printf '%s' "$RESPONSE" | jq -r '.token')" >> "$GITHUB_OUTPUT"

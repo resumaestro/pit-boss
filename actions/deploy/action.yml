@@ -12,12 +12,6 @@ inputs:
   proxy_token:
     description: Oboist bearer token
     required: true
-  cloudflare_token:
-    description: Cloudflare API token
-    required: true
-  cloudflare_account_id:
-    description: Cloudflare account ID
-    required: true
 
 outputs:
   deployed:
@@ -27,6 +21,13 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Create deploy token
+      id: create-token
+      uses: resumaestro/pit-boss/actions/tokens/create@main
+      with:
+        proxy_url: ${{ inputs.proxy_url }}
+        proxy_token: ${{ inputs.proxy_token }}
+
     - name: Fetch variables
       id: fetch-vars
       if: ${{ inputs.variable_keys != '' && inputs.variable_keys != '[]' }}
@@ -49,8 +50,7 @@ runs:
       id: deploy
       shell: bash
       env:
-        CLOUDFLARE_API_TOKEN: ${{ inputs.cloudflare_token }}
-        CLOUDFLARE_ACCOUNT_ID: ${{ inputs.cloudflare_account_id }}
+        CLOUDFLARE_API_TOKEN: ${{ steps.create-token.outputs.token }}
       run: |
         set +e
         ARGS=()
@@ -65,3 +65,11 @@ runs:
           echo "deployed=false" >> "$GITHUB_OUTPUT"
         fi
         exit $EXIT
+
+    - name: Remove deploy token
+      if: always()
+      uses: resumaestro/pit-boss/actions/tokens/remove@main
+      with:
+        key: ${{ steps.create-token.outputs.key }}
+        proxy_url: ${{ inputs.proxy_url }}
+        proxy_token: ${{ inputs.proxy_token }}

@@ -1,0 +1,33 @@
+name: tokens-remove
+description: Remove a scoped Cloudflare deploy token via Oboist.
+
+inputs:
+  key:
+    description: Token ID to remove
+    required: true
+  proxy_url:
+    description: Oboist base URL
+    required: true
+  proxy_token:
+    description: Oboist bearer token
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Remove deploy token
+      shell: bash
+      env:
+        PROXY_TOKEN: ${{ inputs.proxy_token }}
+        PROXY_URL: ${{ inputs.proxy_url }}
+      run: |
+        jq -n --arg key "${{ inputs.key }}" '{ key: $key }' \
+          | curl \
+            --silent \
+            --show-error \
+            --fail-with-body \
+            --request POST \
+            "${PROXY_URL%/}/pit-boss/deploy-token/remove" \
+            --header "Authorization: Bearer ${PROXY_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data-binary @-
