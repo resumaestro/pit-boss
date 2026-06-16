@@ -1,0 +1,164 @@
+name: provision-rollback
+description: Roll back migrations and seeds to a target version.
+
+inputs:
+  target:
+    description: Database target name
+    required: true
+  provision_dir:
+    description: Directory containing provision files (migrations, seeds)
+    required: false
+    default: provision
+  target_migration:
+    description: Migration version to roll back to (inclusive)
+    required: true
+  proxy_url:
+    description: Oboist base URL
+    required: true
+  proxy_token:
+    description: Oboist bearer token
+    required: true
+
+outputs:
+  passed:
+    description: Whether rollback succeeded
+    value: ${{ steps.rollback.outputs.passed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read versions
+      id: read-versions
+      shell: bash
+      env:
+        PROXY_TOKEN: ${{ inputs.proxy_token }}
+        PROXY_URL: ${{ inputs.proxy_url }}
+      run: |
+        . "${{ github.action_path }}/../../../utils/database.sh"
+
+        CURRENT_MIGRATION=$(query_database "${{ inputs.target }}" \
+          "SELECT COALESCE(version, 0) AS version FROM schema_operations WHERE kind = 'migration';" \
+          | jq -er '.results[0].version // 0' 2>/dev/null || echo 0)
+
+        CURRENT_SEED=$(query_database "${{ inputs.target }}" \
+          "SELECT COALESCE(version, 0) AS version FROM schema_operations WHERE kind = 'seed';" \
+          | jq -er '.results[0].version // 0' 2>/dev/null || echo 0)
+
+        TARGET_MIGRATION="${{ inputs.target_migration }}"
+
+        if [[ "$CURRENT_MIGRATION" -le "$TARGET_MIGRATION" ]]; then
+          echo "${{ inputs.target }} is already at migration $CURRENT_MIGRATION (<= target $TARGET_MIGRATION). Nothing to roll back."
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "${{ inputs.target }} migration=$CURRENT_MIGRATION seed=$CURRENT_SEED rolling back to $TARGET_MIGRATION"
+        echo "skip=false" >> "$GITHUB_OUTPUT"
+        echo "current_migration=$CURRENT_MIGRATION" >> "$GITHUB_OUTPUT"
+        echo "current_seed=$CURRENT_SEED" >> "$GITHUB_OUTPUT"
+
+    - name: Plan
+      id: plan
+      if: steps.read-versions.outputs.skip != 'true'
+      shell: bash
+      run: |
+        ACTION_PATH_DIR="${{ github.action_path }}/.."
+        MIGRATIONS_DIR="${{ inputs.provision_dir }}/migrations"
+        SEEDS_DIR="${{ inputs.provision_dir }}/seeds"
+        CURRENT_MIGRATION="${{ steps.read-versions.outputs.current_migration }}"
+        CURRENT_SEED="${{ steps.read-versions.outputs.current_seed }}"
+        TARGET_MIGRATION="${{ inputs.target_migration }}"
+
+        . "$ACTION_PATH_DIR/../../utils/migrations.sh"
+        . "$ACTION_PATH_DIR/../../utils/annotations.sh"
+        . "$ACTION_PATH_DIR/../../utils/seeds.sh"
+
+        echo ""
+        echo "Rollback plan:"
+        echo "  Migration: $CURRENT_MIGRATION → $TARGET_MIGRATION"
+
+        # Find seeds that were applied between TARGET_MIGRATION+1 and CURRENT_MIGRATION,
+        # i.e. seeds with minimum in that range and version <= CURRENT_SEED.
+        # Store in reverse order (highest seed version first).
+        ROLLBACK_SEED_FILES=()
+        ROLLBACK_SEED_AT=()
+
+        if [[ -d "$SEEDS_DIR" ]]; then
+          mapfile -t ALL_SEED_FILES < <(seeds_list "$SEEDS_DIR" 2>/dev/null | sort -r || true)
+
+          for seed_file in "${ALL_SEED_FILES[@]+"${ALL_SEED_FILES[@]}"}"; do
+            seed_ver=$(seed_version "$seed_file")
+            minimum=$(annotation_get_min "$seed_file" || true)
+
+            [[ ! "$minimum" =~ ^[0-9]+$ ]] && continue
+            [[ "$seed_ver" -gt "$CURRENT_SEED" ]] && continue
+            [[ "$minimum" -le "$TARGET_MIGRATION" ]] && continue
+            [[ "$minimum" -gt "$CURRENT_MIGRATION" ]] && continue
+
+            ROLLBACK_SEED_FILES+=("$seed_file")
+            ROLLBACK_SEED_AT+=("$minimum")
+            echo "  Seed $(basename "$seed_file") ↓ (applied at migration $minimum)"
+          done
+        fi
+
+        printf '%s\n' "${ROLLBACK_SEED_FILES[@]+"${ROLLBACK_SEED_FILES[@]}"}" > /tmp/rollback_seed_files
+        printf '%s\n' "${ROLLBACK_SEED_AT[@]+"${ROLLBACK_SEED_AT[@]}"}" > /tmp/rollback_seed_at
+
+    - name: Execute
+      id: rollback
+      if: steps.read-versions.outputs.skip != 'true'
+      shell: bash
+      env:
+        PROXY_TOKEN: ${{ inputs.proxy_token }}
+        PROXY_URL: ${{ inputs.proxy_url }}
+      run: |
+        set +e
+
+        ACTION_PATH_DIR="${{ github.action_path }}/.."
+        MIGRATIONS_DIR="${{ inputs.provision_dir }}/migrations"
+        SEEDS_DIR="${{ inputs.provision_dir }}/seeds"
+        CURRENT_MIGRATION="${{ steps.read-versions.outputs.current_migration }}"
+        CURRENT_SEED="${{ steps.read-versions.outputs.current_seed }}"
+        TARGET_MIGRATION="${{ inputs.target_migration }}"
+
+        . "${{ github.action_path }}/../../../utils/database.sh"
+        . "$ACTION_PATH_DIR/database/utils.sh"
+
+        mapfile -t ROLLBACK_SEED_FILES < /tmp/rollback_seed_files
+        mapfile -t ROLLBACK_SEED_AT < /tmp/rollback_seed_at
+
+        seeds_at_migration() {
+          local at="$1"
+          for i in "${!ROLLBACK_SEED_FILES[@]}"; do
+            [[ "${ROLLBACK_SEED_AT[$i]}" -eq "$at" ]] && printf '%s\n' "${ROLLBACK_SEED_FILES[$i]}"
+          done
+        }
+
+        echo ""
+        echo "==> Rolling back ${{ inputs.target }}..."
+
+        for (( v = CURRENT_MIGRATION; v > TARGET_MIGRATION; v-- )); do
+          for seed_file in $(seeds_at_migration "$v"); do
+            apply_seed "${{ inputs.target }}" "$seed_file"
+          done
+          apply_migration_down "${{ inputs.target }}" "$v"
+        done
+
+        # Roll back any seeds that were applied at or before TARGET_MIGRATION
+        # but after the previous rollback point — i.e. seeds with minimum == TARGET_MIGRATION
+        # that should no longer be active. Seeds are not individually reversed here;
+        # the seed version tracker is decremented to the highest seed <= TARGET_MIGRATION.
+        NEW_SEED_VERSION=$(query_database "${{ inputs.target }}" \
+          "SELECT COALESCE(version, 0) AS version FROM schema_operations WHERE kind = 'seed';" \
+          | jq -er '.results[0].version // 0' 2>/dev/null || echo 0)
+
+        echo ""
+        echo "Done. ${{ inputs.target }} rolled back to migration=$TARGET_MIGRATION seed=$NEW_SEED_VERSION"
+
+        EXIT=$?
+        if [[ $EXIT -eq 0 ]]; then
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "passed=false" >> "$GITHUB_OUTPUT"
+        fi
+        exit $EXIT
