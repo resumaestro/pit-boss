@@ -12,6 +12,12 @@ inputs:
   proxy_token:
     description: Oboist bearer token
     required: true
+  cloudflare_token:
+    description: Cloudflare API token
+    required: true
+  cloudflare_account_id:
+    description: Cloudflare account ID
+    required: true
 
 outputs:
   deployed:
@@ -42,6 +48,9 @@ runs:
     - name: Deploy
       id: deploy
       shell: bash
+      env:
+        CLOUDFLARE_API_TOKEN: ${{ inputs.cloudflare_token }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ inputs.cloudflare_account_id }}
       run: |
         set +e
         ARGS=()

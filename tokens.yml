@@ -1,0 +1,4 @@
+cloudflare:
+  scope:
+    - API Tokens Read
+    - Workers Scripts Write
