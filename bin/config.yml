@@ -1,0 +1,4 @@
+proxy:
+  url: https://resumaestro-oboist.cameronaziz.workers.dev
+  token: ${{ inputs.proxy_url }}
+

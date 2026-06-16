@@ -1,0 +1,59 @@
+name: provision-apply-rollback
+description: Roll back a KV apply to its pre-apply snapshot via Oboist.
+
+inputs:
+  target:
+    description: KV target name (e.g. RESUMAESTRO_CONFIG)
+    required: true
+  version:
+    description: Apply version to roll back (the version that was applied)
+    required: true
+  proxy_url:
+    description: Oboist base URL
+    required: true
+  proxy_token:
+    description: Oboist bearer token
+    required: true
+
+outputs:
+  passed:
+    description: Whether rollback succeeded
+    value: ${{ steps.rollback.outputs.passed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Rollback apply
+      id: rollback
+      shell: bash
+      env:
+        PROXY_TOKEN: ${{ inputs.proxy_token }}
+        PROXY_URL: ${{ inputs.proxy_url }}
+      run: |
+        set +e
+
+        PAYLOAD=$(jq -n \
+          --arg target "${{ inputs.target }}" \
+          --argjson version "${{ inputs.version }}" \
+          '{ target: $target, version: $version }')
+
+        RESPONSE=$(printf '%s' "$PAYLOAD" \
+          | curl \
+            --silent \
+            --show-error \
+            --fail-with-body \
+            --request POST \
+            "${PROXY_URL%/}/apply/rollback" \
+            --header "Authorization: Bearer ${PROXY_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data-binary @-)
+
+        EXIT=$?
+        echo "$RESPONSE"
+
+        if [[ $EXIT -eq 0 ]]; then
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "passed=false" >> "$GITHUB_OUTPUT"
+        fi
+        exit $EXIT
